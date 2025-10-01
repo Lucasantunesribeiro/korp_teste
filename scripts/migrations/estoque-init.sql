@@ -46,6 +46,14 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pendentes
 CREATE INDEX IF NOT EXISTS idx_outbox_tipo_evento ON eventos_outbox(tipo_evento);
 CREATE INDEX IF NOT EXISTS idx_outbox_id_agregado ON eventos_outbox(id_agregado);
 
+-- Tabela mensagens_processadas (idempotência RabbitMQ)
+CREATE TABLE IF NOT EXISTS mensagens_processadas (
+    id_mensagem VARCHAR(100) PRIMARY KEY,
+    data_processada TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_msg_data ON mensagens_processadas(data_processada DESC);
+
 -- Dados de exemplo (opcional)
 INSERT INTO produtos (id, sku, nome, saldo, ativo, data_criacao) VALUES
     (gen_random_uuid(), 'PROD-001', 'Produto Demo 1', 100, true, NOW()),

@@ -1,6 +1,8 @@
 package manipulador
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -29,7 +31,7 @@ func (h *Handlers) CriarNota(c *gin.Context) {
 
 	nota := dominio.NotaFiscal{
 		Numero: req.Numero,
-		Status: "ABERTA",
+		Status: dominio.StatusNotaAberta,
 	}
 
 	if err := h.DB.Create(&nota).Error; err != nil {
@@ -116,7 +118,7 @@ func (h *Handlers) AdicionarItem(c *gin.Context) {
 		return
 	}
 
-	if nota.Status != "ABERTA" {
+	if nota.Status != dominio.StatusNotaAberta {
 		c.JSON(http.StatusConflict, gin.H{"erro": "Nota não está aberta"})
 		return
 	}
@@ -169,27 +171,93 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 		return
 	}
 
-	if nota.Status != "ABERTA" {
+	if nota.Status != dominio.StatusNotaAberta {
 		c.JSON(http.StatusConflict, gin.H{"erro": "Nota não está aberta"})
 		return
 	}
 
-	// criar solicitação
-	sol := dominio.SolicitacaoImpressao{
-		NotaID:            notaID,
-		Status:            "PENDENTE",
-		ChaveIdempotencia: chaveIdem,
-	}
-
-	if err := h.DB.Create(&sol).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao criar solicitação"})
+	// buscar itens da nota pra enviar no evento
+	var itens []dominio.ItemNota
+	if err := h.DB.Where("nota_id = ?", notaID).Find(&itens).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar itens"})
 		return
 	}
 
-	// TODO: publicar evento "Faturamento.ImpressaoSolicitada" no outbox
-	// (simplificado: saga já inicia quando estoque reserva)
+	if len(itens) == 0 {
+		c.JSON(http.StatusConflict, gin.H{"erro": "Nota sem itens não pode ser impressa"})
+		return
+	}
 
-	c.JSON(http.StatusCreated, sol)
+	// criar solicitação + publicar evento no outbox (transação garante atomicidade)
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		sol := dominio.SolicitacaoImpressao{
+			NotaID:            notaID,
+			Status:            "PENDENTE",
+			ChaveIdempotencia: chaveIdem,
+		}
+
+		if err := tx.Create(&sol).Error; err != nil {
+			return err
+		}
+
+		// montar payload JSON com lista de itens pra reservar
+		type itemEvento struct {
+			ProdutoID  string `json:"produtoId"`
+			Quantidade int    `json:"quantidade"`
+		}
+
+		type payloadEvento struct {
+			NotaID string        `json:"notaId"`
+			Itens  []itemEvento  `json:"itens"`
+		}
+
+		var itensEvento []itemEvento
+		for _, item := range itens {
+			itensEvento = append(itensEvento, itemEvento{
+				ProdutoID:  item.ProdutoID.String(),
+				Quantidade: item.Quantidade,
+			})
+		}
+
+		payload := payloadEvento{
+			NotaID: notaID.String(),
+			Itens:  itensEvento,
+		}
+
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("falha ao serializar payload: %w", err)
+		}
+
+		// inserir evento no outbox (será publicado pelo background worker)
+		eventoOutbox := dominio.EventoOutbox{
+			TipoEvento:     "Faturamento.ImpressaoSolicitada",
+			IdAgregado:     notaID,
+			Payload:        string(payloadJSON),
+			DataOcorrencia: time.Now(),
+		}
+
+		if err := tx.Create(&eventoOutbox).Error; err != nil {
+			return fmt.Errorf("falha ao criar evento outbox: %w", err)
+		}
+
+		// sucesso: commit da transação
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"erro": fmt.Sprintf("Falha ao processar: %v", err)})
+		return
+	}
+
+	// buscar a solicitação criada pra retornar
+	var solCriada dominio.SolicitacaoImpressao
+	if err := h.DB.Where("chave_idempotencia = ?", chaveIdem).First(&solCriada).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar solicitação"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, solCriada)
 }
 
 // GET /api/v1/solicitacoes-impressao/:id

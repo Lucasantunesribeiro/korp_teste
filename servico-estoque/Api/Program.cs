@@ -32,8 +32,9 @@ builder.Services.AddDbContext<ContextoBancoDados>(opts =>
 // handlers
 builder.Services.AddScoped<ReservarEstoqueHandler>();
 
-// background service pra outbox
+// background services: outbox publisher + rabbitmq consumer
 builder.Services.AddHostedService<PublicadorOutbox>();
+builder.Services.AddHostedService<ConsumidorRabbitMQ>();
 
 // cors pra angular
 builder.Services.AddCors(opts =>

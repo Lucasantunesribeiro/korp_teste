@@ -77,16 +77,13 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  # web-app:
-  #   build: ./web-app
-  #   ports:
-  #     - "4200:80"
-  #   environment:
-  #     API_ESTOQUE: http://localhost:5001
-  #     API_FATURAMENTO: http://localhost:5002
-  #   depends_on:
-  #     - servico-estoque
-  #     - servico-faturamento
+  web-app:
+    build: ./web-app
+    ports:
+      - "8080:80"
+    depends_on:
+      - servico-estoque
+      - servico-faturamento
 
 volumes:
   estoque-data:

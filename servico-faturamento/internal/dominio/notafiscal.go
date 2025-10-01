@@ -8,6 +8,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// Constantes de status da nota fiscal
+const (
+	StatusNotaAberta  = "ABERTA"
+	StatusNotaFechada = "FECHADA"
+)
+
 type NotaFiscal struct {
 	ID          uuid.UUID `gorm:"type:uuid;primary_key" json:"id"`
 	Numero      string    `gorm:"unique;not null" json:"numero"`
@@ -46,13 +52,30 @@ func (i *ItemNota) BeforeCreate(tx *gorm.DB) error {
 }
 
 func (n *NotaFiscal) Fechar() error {
-	if n.Status != "ABERTA" {
+	if n.Status != StatusNotaAberta {
 		return errors.New("nota não está aberta")
 	}
-	n.Status = "FECHADA"
+	if len(n.Itens) == 0 {
+		return errors.New("nota sem itens não pode ser fechada")
+	}
+	n.Status = StatusNotaFechada
 	agora := time.Now()
 	n.DataFechada = &agora
 	return nil
+}
+
+// CalcularTotal retorna o valor total da nota somando todos os itens
+func (n *NotaFiscal) CalcularTotal() float64 {
+	var total float64
+	for _, item := range n.Itens {
+		total += item.CalcularSubtotal()
+	}
+	return total
+}
+
+// CalcularSubtotal retorna o valor do item (quantidade × preço unitário)
+func (i *ItemNota) CalcularSubtotal() float64 {
+	return float64(i.Quantidade) * i.PrecoUnitario
 }
 
 func (n *NotaFiscal) TableName() string {

@@ -1,5 +1,4 @@
-@'
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $API_ESTOQUE = "http://localhost:5001/api/v1"
 $API_FATURAMENTO = "http://localhost:5002/api/v1"
@@ -191,4 +190,3 @@ Write-Host "2. Saldo insuficiente: Rejeicao detectada" -ForegroundColor Yellow
 Write-Host "3. Idempotencia: Mesma chave retorna mesmo resultado" -ForegroundColor Magenta
 Write-Host "4. Rollback: X-Demo-Fail nao persiste mudancas" -ForegroundColor Red
 Write-Host ""
-'@ | Out-File -FilePath .\scripts\demo-fixed.ps1 -Encoding UTF8

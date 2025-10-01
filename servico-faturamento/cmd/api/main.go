@@ -6,6 +6,7 @@ import (
 	"servico-faturamento/internal/config"
 	"servico-faturamento/internal/consumidor"
 	"servico-faturamento/internal/manipulador"
+	"servico-faturamento/internal/publicador"
 
 	"github.com/gin-gonic/gin"
 )
@@ -22,6 +23,11 @@ func main() {
 
 	// criar handlers
 	handlers := &manipulador.Handlers{DB: db}
+
+	// iniciar publicador de eventos (outbox pattern)
+	if err := publicador.IniciarPublicadorOutbox(db); err != nil {
+		log.Fatalf("Erro ao iniciar publicador outbox: %v", err)
+	}
 
 	// iniciar consumidor RabbitMQ em goroutine separada
 	go func() {

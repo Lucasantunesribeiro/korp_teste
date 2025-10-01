@@ -95,27 +95,64 @@ public sealed class ReservarEstoqueHandler
             await tx.RollbackAsync(ct);
             _logger.LogWarning(ex, "Conflito de concorrência ao reservar estoque");
 
-            // publica rejeição
-            var evt = new EventoOutbox
+            // NOVA transação para publicar rejeição (contexto antigo foi abortado)
+            await using var novatx = await _ctx.Database.BeginTransactionAsync(ct);
+            try
             {
-                TipoEvento = "Estoque.ReservaRejeitada",
-                IdAgregado = cmd.NotaId,
-                Payload = JsonSerializer.Serialize(new
+                var evt = new EventoOutbox
                 {
-                    notaId = cmd.NotaId,
-                    motivo = "Conflito de concorrência"
-                }),
-                DataOcorrencia = DateTime.UtcNow
-            };
-            _ctx.EventosOutbox.Add(evt);
-            await _ctx.SaveChangesAsync(ct);
+                    TipoEvento = "Estoque.ReservaRejeitada",
+                    IdAgregado = cmd.NotaId,
+                    Payload = JsonSerializer.Serialize(new
+                    {
+                        notaId = cmd.NotaId,
+                        motivo = "Conflito de concorrência"
+                    }),
+                    DataOcorrencia = DateTime.UtcNow
+                };
+                _ctx.EventosOutbox.Add(evt);
+                await _ctx.SaveChangesAsync(ct);
+                await novatx.CommitAsync(ct);
+            }
+            catch (Exception saveEx)
+            {
+                _logger.LogError(saveEx, "Falha ao publicar evento de rejeição após conflito");
+                await novatx.RollbackAsync(ct);
+            }
 
             return Resultado<ReservaEstoque>.Falha("Produto modificado. Tente novamente.");
         }
-        catch
+        catch (Exception ex)
         {
             await tx.RollbackAsync(ct);
-            throw;
+            _logger.LogError(ex, "Erro ao processar reserva para NotaId={NotaId}", cmd.NotaId);
+
+            // Publica evento de rejeição em NOVA transação
+            await using var novatx = await _ctx.Database.BeginTransactionAsync(ct);
+            try
+            {
+                var evt = new EventoOutbox
+                {
+                    TipoEvento = "Estoque.ReservaRejeitada",
+                    IdAgregado = cmd.NotaId,
+                    Payload = JsonSerializer.Serialize(new
+                    {
+                        notaId = cmd.NotaId,
+                        motivo = ex.Message
+                    }),
+                    DataOcorrencia = DateTime.UtcNow
+                };
+                _ctx.EventosOutbox.Add(evt);
+                await _ctx.SaveChangesAsync(ct);
+                await novatx.CommitAsync(ct);
+            }
+            catch (Exception saveEx)
+            {
+                _logger.LogError(saveEx, "Falha ao publicar evento de rejeição após erro");
+                await novatx.RollbackAsync(ct);
+            }
+
+            return Resultado<ReservaEstoque>.Falha($"Erro ao processar reserva: {ex.Message}");
         }
     }
 }
