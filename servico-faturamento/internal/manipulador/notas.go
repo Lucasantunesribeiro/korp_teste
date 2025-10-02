@@ -3,6 +3,7 @@ package manipulador
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -240,6 +241,8 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 		if err := tx.Create(&eventoOutbox).Error; err != nil {
 			return fmt.Errorf("falha ao criar evento outbox: %w", err)
 		}
+
+		log.Printf("✓ Evento criado no outbox: %s para nota %s", eventoOutbox.TipoEvento, notaID)
 
 		// sucesso: commit da transação
 		return nil

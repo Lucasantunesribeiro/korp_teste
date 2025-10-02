@@ -25,16 +25,15 @@ func main() {
 	handlers := &manipulador.Handlers{DB: db}
 
 	// iniciar publicador de eventos (outbox pattern)
-	if err := publicador.IniciarPublicadorOutbox(db); err != nil {
+	if err := publicador.IniciarPublicador(db); err != nil {
 		log.Fatalf("Erro ao iniciar publicador outbox: %v", err)
 	}
 
-	// iniciar consumidor RabbitMQ em goroutine separada
-	go func() {
-		if err := consumidor.IniciarConsumidor(db, handlers); err != nil {
-			log.Printf("Erro ao iniciar consumidor: %v", err)
-		}
-	}()
+	// iniciar consumidor RabbitMQ - CRÍTICO para Saga funcionar
+	if err := consumidor.IniciarConsumidor(db, handlers); err != nil {
+		log.Fatalf("ERRO CRÍTICO: Falha ao iniciar consumidor RabbitMQ: %v", err)
+	}
+	log.Println("✓ Consumidor RabbitMQ iniciado com sucesso")
 
 	// setup servidor Gin
 	r := gin.Default()

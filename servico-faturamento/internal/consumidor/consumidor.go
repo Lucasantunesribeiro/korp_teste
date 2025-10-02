@@ -212,6 +212,7 @@ func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) error {
 	// mas precisamos usar a mesma transação
 	var nota dominio.NotaFiscal
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Preload("Itens").
 		First(&nota, "id = ?", notaID).Error; err != nil {
 		return fmt.Errorf("falha ao buscar nota: %w", err)
 	}

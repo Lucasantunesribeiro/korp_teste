@@ -10,6 +10,7 @@ public class ContextoBancoDados : DbContext
     public DbSet<Produto> Produtos => Set<Produto>();
     public DbSet<ReservaEstoque> ReservasEstoque => Set<ReservaEstoque>();
     public DbSet<EventoOutbox> EventosOutbox => Set<EventoOutbox>();
+    public DbSet<MensagemProcessada> MensagensProcessadas => Set<MensagemProcessada>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -69,6 +70,15 @@ public class ContextoBancoDados : DbContext
             e.HasIndex(x => x.DataPublicacao)
                 .HasFilter("data_publicacao IS NULL")
                 .HasDatabaseName("idx_outbox_pendentes");
+        });
+
+        builder.Entity<MensagemProcessada>(m =>
+        {
+            m.ToTable("mensagens_processadas");
+            m.HasKey(x => x.IDMensagem);
+
+            m.Property(x => x.IDMensagem).HasColumnName("id_mensagem").HasMaxLength(100);
+            m.Property(x => x.DataProcessada).HasColumnName("data_processada").IsRequired();
         });
     }
 }

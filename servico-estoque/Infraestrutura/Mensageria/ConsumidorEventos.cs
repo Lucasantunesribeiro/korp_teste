@@ -5,6 +5,7 @@ using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using ServicoEstoque.Aplicacao.CasosDeUso;
 using ServicoEstoque.Aplicacao.DTOs;
+using ServicoEstoque.Dominio.Entidades;
 using ServicoEstoque.Infraestrutura.Persistencia;
 
 namespace ServicoEstoque.Infraestrutura.Mensageria;
@@ -13,14 +14,14 @@ namespace ServicoEstoque.Infraestrutura.Mensageria;
 /// Consumidor de eventos do RabbitMQ para processar solicitações de reserva vindas do Faturamento
 /// Implementa idempotência e processamento transacional
 /// </summary>
-public class ConsumidorRabbitMQ : BackgroundService
+public class ConsumidorEventos : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
-    private readonly ILogger<ConsumidorRabbitMQ> _logger;
+    private readonly ILogger<ConsumidorEventos> _logger;
     private IConnection? _conexao;
     private IModel? _canal;
 
-    public ConsumidorRabbitMQ(IServiceProvider serviceProvider, ILogger<ConsumidorRabbitMQ> logger)
+    public ConsumidorEventos(IServiceProvider serviceProvider, ILogger<ConsumidorEventos> logger)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
@@ -59,12 +60,12 @@ public class ConsumidorRabbitMQ : BackgroundService
             NetworkRecoveryInterval = TimeSpan.FromSeconds(10)
         };
 
-        // retry: rabbitmq demora pra subir no docker
-        for (int tentativa = 1; tentativa <= 15; tentativa++)
+        // RETRY AGRESSIVO: RabbitMQ pode demorar até 2 minutos no Docker
+        for (int tentativa = 1; tentativa <= 30; tentativa++)
         {
             try
             {
-                _logger.LogInformation("Tentativa {Tentativa}/15 de conexão com RabbitMQ...", tentativa);
+                _logger.LogInformation("Tentativa {Tentativa}/30 de conexão com RabbitMQ ({Host})...", tentativa, host);
                 _conexao = factory.CreateConnection();
                 _canal = _conexao.CreateModel();
 
@@ -75,10 +76,16 @@ public class ConsumidorRabbitMQ : BackgroundService
             {
                 _logger.LogWarning("Falha na tentativa {Tentativa}: {Erro}", tentativa, ex.Message);
 
-                if (tentativa < 15)
-                    await Task.Delay(3000, ct);
+                if (tentativa < 30)
+                {
+                    // backoff: 3s inicial, depois 5s
+                    int delay = tentativa == 1 ? 3000 : 5000;
+                    await Task.Delay(delay, ct);
+                }
             }
         }
+
+        _logger.LogCritical("FALHA CRÍTICA: Não foi possível conectar ao RabbitMQ após 30 tentativas");
     }
 
     private void ConfigurarConsumidor()
@@ -107,6 +114,8 @@ public class ConsumidorRabbitMQ : BackgroundService
             exchange: "faturamento-eventos",
             routingKey: "Faturamento.ImpressaoSolicitada"
         );
+
+        _logger.LogInformation("✓ Escutando: Faturamento.ImpressaoSolicitada");
 
         // QoS: processar 1 mensagem por vez (evita concorrência interna)
         _canal.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
@@ -145,26 +154,25 @@ public class ConsumidorRabbitMQ : BackgroundService
         var idMensagem = args.BasicProperties.MessageId ?? $"delivery-{args.DeliveryTag}";
 
         // verificar se já processamos essa msg (evita duplicação em retry)
-        var jaProcessada = await contexto.Database
-            .SqlQuery<int>($"SELECT COUNT(*) FROM mensagens_processadas WHERE id_mensagem = {idMensagem}")
-            .FirstOrDefaultAsync();
+        var jaProcessada = await contexto.Set<MensagemProcessada>()
+            .AnyAsync(m => m.IDMensagem == idMensagem);
 
-        if (jaProcessada > 0)
+        if (jaProcessada)
         {
             _logger.LogInformation("Mensagem {MsgId} já foi processada anteriormente, ignorando", idMensagem);
             return;
         }
 
-        // deserializar payload JSON
+        // deserializar payload JSON (CORRIGIDO: recebe lista de itens)
         var corpo = Encoding.UTF8.GetString(args.Body.ToArray());
         var evento = JsonSerializer.Deserialize<EventoSolicitacaoImpressao>(corpo, new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true
         });
 
-        if (evento is null)
+        if (evento is null || evento.Itens is null || evento.Itens.Count == 0)
         {
-            _logger.LogError("Falha ao deserializar evento: {Corpo}", corpo);
+            _logger.LogError("Falha ao deserializar evento ou evento sem itens: {Corpo}", corpo);
             return;
         }
 
@@ -173,7 +181,10 @@ public class ConsumidorRabbitMQ : BackgroundService
             evento.NotaId, evento.Itens.Count
         );
 
-        // processar cada item da nota (reservar estoque)
+        // processar cada item da nota
+        bool todasReservasOK = true;
+        string? motivoFalha = null;
+
         foreach (var item in evento.Itens)
         {
             var comando = new ReservarEstoqueCommand(
@@ -187,11 +198,14 @@ public class ConsumidorRabbitMQ : BackgroundService
 
             if (resultado.Falhou)
             {
+                todasReservasOK = false;
+                motivoFalha = resultado.Mensagem;
                 _logger.LogWarning(
                     "Reserva rejeitada para produto {ProdutoId}: {Motivo}",
                     item.ProdutoId, resultado.Mensagem
                 );
                 // evento de rejeição já foi publicado pelo handler
+                break; // para no primeiro erro
             }
             else
             {
@@ -203,12 +217,21 @@ public class ConsumidorRabbitMQ : BackgroundService
         }
 
         // marcar mensagem como processada (idempotência)
-        await contexto.Database.ExecuteSqlRawAsync(
-            "INSERT INTO mensagens_processadas (id_mensagem, data_processada) VALUES ({0}, {1})",
-            idMensagem, DateTime.UtcNow
-        );
+        contexto.MensagensProcessadas.Add(new MensagemProcessada
+        {
+            IDMensagem = idMensagem,
+            DataProcessada = DateTime.UtcNow
+        });
+        await contexto.SaveChangesAsync();
 
-        _logger.LogInformation("Solicitação {NotaId} processada com sucesso", evento.NotaId);
+        if (todasReservasOK)
+        {
+            _logger.LogInformation("✓ Todas as reservas processadas com sucesso para nota {NotaId}", evento.NotaId);
+        }
+        else
+        {
+            _logger.LogWarning("✗ Falha ao processar nota {NotaId}: {Motivo}", evento.NotaId, motivoFalha);
+        }
     }
 
     public override void Dispose()
@@ -219,13 +242,13 @@ public class ConsumidorRabbitMQ : BackgroundService
     }
 }
 
-// DTOs internos para deserializar eventos
+// DTOs internos para deserializar eventos (payload vem do Go)
 internal record EventoSolicitacaoImpressao(
     Guid NotaId,
-    List<ItemNotaEvento> Itens
+    List<ItemEventoImpressao> Itens
 );
 
-internal record ItemNotaEvento(
+internal record ItemEventoImpressao(
     Guid ProdutoId,
     int Quantidade
 );

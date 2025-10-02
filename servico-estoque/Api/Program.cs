@@ -24,7 +24,6 @@ var connStr = Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConn
 builder.Services.AddDbContext<ContextoBancoDados>(opts =>
     opts.UseNpgsql(connStr, npgsql =>
     {
-        npgsql.EnableRetryOnFailure(3);
         npgsql.CommandTimeout(30);
     })
 );
@@ -34,7 +33,7 @@ builder.Services.AddScoped<ReservarEstoqueHandler>();
 
 // background services: outbox publisher + rabbitmq consumer
 builder.Services.AddHostedService<PublicadorOutbox>();
-builder.Services.AddHostedService<ConsumidorRabbitMQ>();
+builder.Services.AddHostedService<ConsumidorEventos>();
 
 // cors pra angular
 builder.Services.AddCors(opts =>
