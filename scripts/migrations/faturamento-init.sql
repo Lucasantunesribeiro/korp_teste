@@ -1,5 +1,7 @@
 -- Criação das tabelas do serviço Faturamento
 
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 -- Tabela notas_fiscais
 CREATE TABLE IF NOT EXISTS notas_fiscais (
     id UUID PRIMARY KEY,

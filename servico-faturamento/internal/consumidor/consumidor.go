@@ -2,6 +2,7 @@ package consumidor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -161,11 +162,17 @@ func (c *Consumidor) ProcessarMensagem(msg amqp.Delivery) error {
 			return nil
 		}
 
+		statusMensagem := "sucesso"
+
 		// processar conforme routing key
 		switch msg.RoutingKey {
 		case "Estoque.Reservado":
-			if err := c.processarEstoqueReservado(tx, msg.Body); err != nil {
+			notaFechada, err := c.processarEstoqueReservado(tx, msg.Body)
+			if err != nil {
 				return err
+			}
+			if !notaFechada {
+				statusMensagem = "ignorada"
 			}
 		case "Estoque.ReservaRejeitada":
 			if err := c.processarReservaRejeitada(tx, msg.Body); err != nil {
@@ -185,12 +192,16 @@ func (c *Consumidor) ProcessarMensagem(msg amqp.Delivery) error {
 			return err
 		}
 
-		log.Printf("Mensagem %s processada com sucesso", idMsg)
+		if statusMensagem == "sucesso" {
+			log.Printf("Mensagem %s processada com sucesso", idMsg)
+		} else {
+			log.Printf("Mensagem %s marcada como %s", idMsg, statusMensagem)
+		}
 		return nil
 	})
 }
 
-func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) error {
+func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) (bool, error) {
 	var evento struct {
 		NotaID     string `json:"notaId"`
 		ProdutoID  string `json:"produtoId"`
@@ -198,12 +209,12 @@ func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) error {
 	}
 
 	if err := json.Unmarshal(body, &evento); err != nil {
-		return fmt.Errorf("falha ao fazer unmarshal: %w", err)
+		return false, fmt.Errorf("falha ao fazer unmarshal: %w", err)
 	}
 
 	notaID, err := uuid.Parse(evento.NotaID)
 	if err != nil {
-		return fmt.Errorf("notaId inválido: %w", err)
+		return false, fmt.Errorf("notaId inválido: %w", err)
 	}
 
 	log.Printf("Estoque reservado para nota %s, fechando nota...", notaID)
@@ -214,15 +225,19 @@ func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) error {
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Preload("Itens").
 		First(&nota, "id = ?", notaID).Error; err != nil {
-		return fmt.Errorf("falha ao buscar nota: %w", err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("Nota %s não encontrada; evento será marcado como ignorado", notaID)
+			return false, nil
+		}
+		return false, fmt.Errorf("falha ao buscar nota: %w", err)
 	}
 
 	if err := nota.Fechar(); err != nil {
-		return fmt.Errorf("falha ao fechar nota: %w", err)
+		return false, fmt.Errorf("falha ao fechar nota: %w", err)
 	}
 
 	if err := tx.Save(&nota).Error; err != nil {
-		return fmt.Errorf("falha ao salvar nota: %w", err)
+		return false, fmt.Errorf("falha ao salvar nota: %w", err)
 	}
 
 	// atualizar solicitação
@@ -233,11 +248,11 @@ func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) error {
 			"status":          "CONCLUIDA",
 			"data_conclusao": agora,
 		}).Error; err != nil {
-		return fmt.Errorf("falha ao atualizar solicitação: %w", err)
+		return false, fmt.Errorf("falha ao atualizar solicitação: %w", err)
 	}
 
 	log.Printf("Nota %s fechada com sucesso", notaID)
-	return nil
+	return true, nil
 }
 
 func (c *Consumidor) processarReservaRejeitada(tx *gorm.DB, body []byte) error {

@@ -22,16 +22,27 @@ public class ReservasController : ControllerBase
     {
         // suporte pra testes: simular falha via header
         var demoFail = Request.Headers["X-Demo-Fail"].FirstOrDefault();
-        bool simularFalha = demoFail == "true";
+        bool simularFalha = demoFail?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+
+        _logger.LogInformation(
+            "[ReservasController] Recebendo requisição: NotaId={NotaId}, ProdutoId={ProdutoId}, Quantidade={Quantidade}, X-Demo-Fail={Header}",
+            request.NotaId,
+            request.ProdutoId,
+            request.Quantidade,
+            demoFail ?? "<null>"
+        );
 
         if (simularFalha)
-            _logger.LogWarning("Simulação de falha ativada via header X-Demo-Fail");
+            _logger.LogWarning("[ReservasController] Simulação de falha ativada via header X-Demo-Fail");
+        else
+            _logger.LogInformation("[ReservasController] X-Demo-Fail desativado (valor='{Header}')", demoFail ?? "<null>");
 
         var comando = new ReservarEstoqueCommand(
             request.NotaId,
             request.ProdutoId,
             request.Quantidade
         );
+        _logger.LogInformation("[ReservasController] Enviando comando para handler. SimularFalha={SimularFalha}", simularFalha);
 
         var resultado = await _handler.Executar(comando, simularFalha);
 

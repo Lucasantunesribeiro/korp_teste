@@ -57,13 +57,14 @@ git clone <repo-url>
 cd Viasoft_Korp_ERP
 
 # Subir infraestrutura + serviços
-docker-compose up -d
+docker compose up -d
 
 # Verificar status
-docker-compose ps
+docker compose ps
 
 # Acessos:
 # - API Estoque: http://localhost:5001/swagger
+# - Health Estoque: http://localhost:5001/health
 # - API Faturamento: http://localhost:5002/health
 # - RabbitMQ Management: http://localhost:15672 (admin/admin123)
 # - Frontend: http://localhost:4200
@@ -394,6 +395,10 @@ web-app/src/app/
 - ✅ Toast notifications (sucesso/erro)
 - ✅ Signals para state management
 
+### Proxy local
+
+O arquivo `proxy.conf.json` redireciona `http://localhost:4200/api/estoque` → `http://localhost:5001/api/v1` e `http://localhost:4200/api/faturamento` → `http://localhost:5002/api/v1`. Assim `ng serve` funciona igual ao Nginx do container sem ajustes no código.
+
 ### Polling de Status
 
 ```typescript
@@ -707,8 +712,8 @@ cd web-app
 # Instalar dependências
 npm install
 
-# Desenvolvimento
-npm run dev
+# Desenvolvimento (proxy configurado para /api/*)
+npm run start
 
 # Build produção
 npm run build
@@ -734,13 +739,13 @@ Visualizar:
 
 ```bash
 # Estoque
-docker-compose logs -f servico-estoque
+docker compose logs --tail 20 -f servico-estoque
 
 # Faturamento
-docker-compose logs -f servico-faturamento
+docker compose logs --tail 20 -f servico-faturamento
 
 # Todos
-docker-compose logs -f
+docker compose logs -f
 ```
 
 ---
@@ -780,12 +785,12 @@ Performance: commit rápido, publicação assíncrona.
 
 ```bash
 # Verificar logs
-docker-compose logs servico-estoque
-docker-compose logs servico-faturamento
+docker compose logs servico-estoque
+docker compose logs servico-faturamento
 
 # Recriar containers
-docker-compose down -v
-docker-compose up -d --build
+docker compose down -v
+docker compose up -d --build
 ```
 
 ### Migrations não aplicadas
@@ -805,13 +810,13 @@ dotnet ef database update
 
 ```bash
 # Verificar se está rodando
-docker-compose ps rabbitmq
+docker compose ps rabbitmq
 
 # Acessar logs
-docker-compose logs rabbitmq
+docker compose logs rabbitmq
 
 # Reiniciar
-docker-compose restart rabbitmq
+docker compose restart rabbitmq
 ```
 
 ---

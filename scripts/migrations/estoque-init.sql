@@ -1,5 +1,7 @@
 -- Criação das tabelas do serviço Estoque
 
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 -- Tabela produtos
 CREATE TABLE IF NOT EXISTS produtos (
     id UUID PRIMARY KEY,

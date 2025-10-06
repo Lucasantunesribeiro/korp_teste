@@ -1,16 +1,36 @@
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using ServicoEstoque.Dominio.Entidades;
 
 namespace ServicoEstoque.Infraestrutura.Persistencia;
 
 public class ContextoBancoDados : DbContext
 {
-    public ContextoBancoDados(DbContextOptions<ContextoBancoDados> options) : base(options) { }
+    private readonly ILogger<ContextoBancoDados>? _logger;
+
+    public ContextoBancoDados(DbContextOptions<ContextoBancoDados> options, ILogger<ContextoBancoDados>? logger = null)
+        : base(options)
+    {
+        _logger = logger;
+        _logger?.LogDebug("[ContextoBancoDados] Inicializado. AutoDetectChangesEnabled={AutoDetect}, TrackingBehavior={Tracking}",
+            ChangeTracker.AutoDetectChangesEnabled,
+            ChangeTracker.QueryTrackingBehavior);
+    }
 
     public DbSet<Produto> Produtos => Set<Produto>();
     public DbSet<ReservaEstoque> ReservasEstoque => Set<ReservaEstoque>();
     public DbSet<EventoOutbox> EventosOutbox => Set<EventoOutbox>();
     public DbSet<MensagemProcessada> MensagensProcessadas => Set<MensagemProcessada>();
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        _logger?.LogDebug("[ContextoBancoDados] SaveChangesAsync chamado. AutoDetectChangesEnabled={AutoDetect}, TrackingBehavior={Tracking}",
+            ChangeTracker.AutoDetectChangesEnabled,
+            ChangeTracker.QueryTrackingBehavior);
+        return base.SaveChangesAsync(cancellationToken);
+    }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
