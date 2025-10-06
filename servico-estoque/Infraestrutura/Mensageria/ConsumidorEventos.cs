@@ -11,8 +11,8 @@ using ServicoEstoque.Infraestrutura.Persistencia;
 namespace ServicoEstoque.Infraestrutura.Mensageria;
 
 /// <summary>
-/// Consumidor de eventos do RabbitMQ para processar solicitações de reserva vindas do Faturamento
-/// Implementa idempotência e processamento transacional
+/// Consumidor de eventos do RabbitMQ para processar solicitacoes de reserva vindas do Faturamento
+/// Implementa idempotencia e processamento transacional
 /// </summary>
 public class ConsumidorEventos : BackgroundService
 {
@@ -33,7 +33,7 @@ public class ConsumidorEventos : BackgroundService
 
         if (_canal is null)
         {
-            _logger.LogError("Não foi possível estabelecer conexão com RabbitMQ após várias tentativas");
+            _logger.LogError("Nao foi possivel estabelecer conexao com RabbitMQ apos varias tentativas");
             return;
         }
 
@@ -41,7 +41,7 @@ public class ConsumidorEventos : BackgroundService
 
         _logger.LogInformation("Consumidor RabbitMQ iniciado, aguardando eventos...");
 
-        // manter serviço vivo enquanto app rodar
+        // manter servico vivo enquanto app rodar
         await Task.Delay(Timeout.Infinite, stoppingToken);
     }
 
@@ -60,16 +60,16 @@ public class ConsumidorEventos : BackgroundService
             NetworkRecoveryInterval = TimeSpan.FromSeconds(10)
         };
 
-        // RETRY AGRESSIVO: RabbitMQ pode demorar até 2 minutos no Docker
+        // RETRY agressivo: RabbitMQ pode demorar ate 2 minutos no Docker
         for (int tentativa = 1; tentativa <= 30; tentativa++)
         {
             try
             {
-                _logger.LogInformation("Tentativa {Tentativa}/30 de conexão com RabbitMQ ({Host})...", tentativa, host);
+                _logger.LogInformation("Tentativa {Tentativa}/30 de conexao com RabbitMQ ({Host})...", tentativa, host);
                 _conexao = factory.CreateConnection();
                 _canal = _conexao.CreateModel();
 
-                _logger.LogInformation("✓ Conectado ao RabbitMQ com sucesso");
+                _logger.LogInformation("Conectado ao RabbitMQ com sucesso");
                 return;
             }
             catch (Exception ex)
@@ -85,14 +85,14 @@ public class ConsumidorEventos : BackgroundService
             }
         }
 
-        _logger.LogCritical("FALHA CRÍTICA: Não foi possível conectar ao RabbitMQ após 30 tentativas");
+        _logger.LogCritical("FALHA CRITICA: Nao foi possivel conectar ao RabbitMQ apos 30 tentativas");
     }
 
     private void ConfigurarConsumidor()
     {
         if (_canal is null) return;
 
-        // declarar exchange (topic pattern pra rotear eventos)
+        // declarar exchange (topic pattern para rotear eventos)
         _canal.ExchangeDeclare(
             exchange: "faturamento-eventos",
             type: ExchangeType.Topic,
@@ -108,16 +108,16 @@ public class ConsumidorEventos : BackgroundService
             arguments: null
         ).QueueName;
 
-        // bind: receber eventos de solicitação de impressão (que precisam reservar estoque)
+        // bind: receber eventos de solicitacao de impressao (que precisam reservar estoque)
         _canal.QueueBind(
             queue: nomeFila,
             exchange: "faturamento-eventos",
             routingKey: "Faturamento.ImpressaoSolicitada"
         );
 
-        _logger.LogInformation("✓ Escutando: Faturamento.ImpressaoSolicitada");
+        _logger.LogInformation("Escutando: Faturamento.ImpressaoSolicitada");
 
-        // QoS: processar 1 mensagem por vez (evita concorrência interna)
+        // QoS: processar 1 mensagem por vez (evita concorrencia interna)
         _canal.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
 
         var consumidor = new EventingBasicConsumer(_canal);
@@ -132,14 +132,14 @@ public class ConsumidorEventos : BackgroundService
             {
                 _logger.LogError(ex, "Erro ao processar mensagem {MsgId}", args.BasicProperties.MessageId);
 
-                // NACK com requeue=false: mensagem vai pro DLQ (dead letter queue)
+                // NACK com requeue=false: mensagem vai para DLQ
                 _canal.BasicNack(deliveryTag: args.DeliveryTag, multiple: false, requeue: false);
             }
         };
 
         _canal.BasicConsume(
             queue: nomeFila,
-            autoAck: false, // ACK manual pra garantir processamento
+            autoAck: false, // ACK manual para garantir processamento
             consumer: consumidor
         );
     }
@@ -150,20 +150,20 @@ public class ConsumidorEventos : BackgroundService
         var contexto = escopo.ServiceProvider.GetRequiredService<ContextoBancoDados>();
         var handler = escopo.ServiceProvider.GetRequiredService<ReservarEstoqueHandler>();
 
-        // idempotência: usar MessageId único do RabbitMQ
+        // idempotencia: usar MessageId unico do RabbitMQ
         var idMensagem = args.BasicProperties.MessageId ?? $"delivery-{args.DeliveryTag}";
 
-        // verificar se já processamos essa msg (evita duplicação em retry)
+        // verificar se ja processamos essa msg (evita duplicacao em retry)
         var jaProcessada = await contexto.Set<MensagemProcessada>()
             .AnyAsync(m => m.IDMensagem == idMensagem);
 
         if (jaProcessada)
         {
-            _logger.LogInformation("Mensagem {MsgId} já foi processada anteriormente, ignorando", idMensagem);
+            _logger.LogInformation("Mensagem {MsgId} ja foi processada anteriormente, ignorando", idMensagem);
             return;
         }
 
-        // deserializar payload JSON (CORRIGIDO: recebe lista de itens)
+        // deserializar payload JSON
         var corpo = Encoding.UTF8.GetString(args.Body.ToArray());
         var evento = JsonSerializer.Deserialize<EventoSolicitacaoImpressao>(corpo, new JsonSerializerOptions
         {
@@ -177,46 +177,19 @@ public class ConsumidorEventos : BackgroundService
         }
 
         _logger.LogInformation(
-            "Processando solicitação de reserva para nota {NotaId} com {QtdItens} itens",
+            "Processando solicitacao de reserva para nota {NotaId} com {QtdItens} itens",
             evento.NotaId, evento.Itens.Count
         );
 
-        // processar cada item da nota
-        bool todasReservasOK = true;
-        string? motivoFalha = null;
+        // processar todos os itens em lote (transacao unica)
+        var itensComando = evento.Itens
+            .Select(i => new ReservarEstoqueItem(i.ProdutoId, i.Quantidade))
+            .ToList();
 
-        foreach (var item in evento.Itens)
-        {
-            var comando = new ReservarEstoqueCommand(
-                NotaId: evento.NotaId,
-                ProdutoId: item.ProdutoId,
-                Quantidade: item.Quantidade
-            );
+        var lote = new ReservarEstoqueLoteCommand(evento.NotaId, itensComando);
+        var resultadoLote = await handler.ExecutarLote(lote, simularFalha: false);
 
-            // handler já tem transação, outbox e trata concorrência
-            var resultado = await handler.Executar(comando, simularFalha: false);
-
-            if (resultado.Falhou)
-            {
-                todasReservasOK = false;
-                motivoFalha = resultado.Mensagem;
-                _logger.LogWarning(
-                    "Reserva rejeitada para produto {ProdutoId}: {Motivo}",
-                    item.ProdutoId, resultado.Mensagem
-                );
-                // evento de rejeição já foi publicado pelo handler
-                break; // para no primeiro erro
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "✓ Reserva criada para produto {ProdutoId}, quantidade {Qtd}",
-                    item.ProdutoId, item.Quantidade
-                );
-            }
-        }
-
-        // marcar mensagem como processada (idempotência)
+        // marcar mensagem como processada (idempotencia)
         contexto.MensagensProcessadas.Add(new MensagemProcessada
         {
             IDMensagem = idMensagem,
@@ -224,13 +197,13 @@ public class ConsumidorEventos : BackgroundService
         });
         await contexto.SaveChangesAsync();
 
-        if (todasReservasOK)
+        if (resultadoLote.Falhou)
         {
-            _logger.LogInformation("✓ Todas as reservas processadas com sucesso para nota {NotaId}", evento.NotaId);
+            _logger.LogWarning("Falha ao processar nota {NotaId}: {Motivo}", evento.NotaId, resultadoLote.Mensagem);
         }
         else
         {
-            _logger.LogWarning("✗ Falha ao processar nota {NotaId}: {Motivo}", evento.NotaId, motivoFalha);
+            _logger.LogInformation("Todas as reservas processadas com sucesso para nota {NotaId}", evento.NotaId);
         }
     }
 

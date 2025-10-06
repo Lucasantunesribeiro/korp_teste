@@ -1,6 +1,7 @@
 package publicador
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -33,7 +34,7 @@ func IniciarPublicador(db *gorm.DB) error {
 		if err == nil {
 			break
 		}
-		log.Printf("Tentativa %d: falha ao conectar RabbitMQ, retry em 3s...", tentativa)
+		log.Printf("[outbox] tentativa=%d falha ao conectar RabbitMQ: %v", tentativa, err)
 		time.Sleep(3 * time.Second)
 	}
 
@@ -46,43 +47,63 @@ func IniciarPublicador(db *gorm.DB) error {
 		return fmt.Errorf("falha ao abrir channel: %w", err)
 	}
 
-	err = ch.ExchangeDeclare("faturamento-eventos", "topic", true, false, false, false, nil)
-	if err != nil {
+	if err := ch.ExchangeDeclare("faturamento-eventos", "topic", true, false, false, false, nil); err != nil {
 		return fmt.Errorf("falha ao declarar exchange: %w", err)
 	}
 
-	log.Println("✓ Publicador Outbox conectado ao RabbitMQ")
+	log.Println("[outbox] conectado ao RabbitMQ e pronto para publicar")
 	go pub.processar(ch)
 	return nil
 }
 
 func (p *PublicadorOutbox) processar(ch *amqp.Channel) {
+	ctx := context.Background()
+
 	for {
 		var eventos []dominio.EventoOutbox
-		p.DB.Where("data_publicacao IS NULL").Limit(10).Find(&eventos)
+		if err := p.DB.Where("data_publicacao IS NULL").Order("id").Limit(20).Find(&eventos).Error; err != nil {
+			log.Printf("[outbox] erro ao carregar eventos pendentes: %v", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		if len(eventos) == 0 {
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
 		for _, evt := range eventos {
-			// CORRIGIDO: int64 para string usando strconv
 			msgID := strconv.FormatInt(evt.ID, 10)
 
-			props := amqp.Publishing{
-				MessageId:   msgID,
-				ContentType: "application/json",
-				Timestamp:   evt.DataOcorrencia,
-				Body:        []byte(evt.Payload),
-			}
+			publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := ch.PublishWithContext(
+				publishCtx,
+				"faturamento-eventos",
+				evt.TipoEvento,
+				false,
+				false,
+				amqp.Publishing{
+					MessageId:   msgID,
+					ContentType: "application/json",
+					Timestamp:   evt.DataOcorrencia,
+					Body:        []byte(evt.Payload),
+				},
+			)
+			cancel()
 
-			err := ch.Publish("faturamento-eventos", evt.TipoEvento, false, false, props)
 			if err != nil {
-				log.Printf("✗ Erro ao publicar evento %d: %v", evt.ID, err)
+				log.Printf("[outbox] erro ao publicar id=%d tipo=%s : %v", evt.ID, evt.TipoEvento, err)
 				continue
 			}
 
-			agora := time.Now()
-			p.DB.Model(&evt).Update("data_publicacao", agora)
-			log.Printf("✓ Evento publicado: %s (ID: %d)", evt.TipoEvento, evt.ID)
-		}
+			if err := p.DB.Model(&dominio.EventoOutbox{}).
+				Where("id = ?", evt.ID).
+				Update("data_publicacao", time.Now()).Error; err != nil {
+				log.Printf("[outbox] publicado id=%d, mas falhou ao atualizar data_publicacao: %v", evt.ID, err)
+				continue
+			}
 
-		time.Sleep(2 * time.Second)
+			log.Printf("[outbox] evento publicado id=%d tipo=%s", evt.ID, evt.TipoEvento)
+		}
 	}
 }

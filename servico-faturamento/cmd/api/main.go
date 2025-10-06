@@ -60,6 +60,9 @@ func main() {
 	// rotas API
 	v1 := r.Group("/api/v1")
 	{
+		v1.GET("/health", func(c *gin.Context) {
+			c.JSON(200, gin.H{"status": "ok"})
+		})
 		// notas
 		v1.POST("/notas", handlers.CriarNota)
 		v1.GET("/notas", handlers.ListarNotas)

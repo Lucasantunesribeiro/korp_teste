@@ -105,6 +105,9 @@ Desktop.ini
 ENTREGA.md
 claude.md
 codex.md
+ROTEIRO.md
+ROTEIRO_2.md
+CORRECOES_URGENTES.md
 
 # ========== Arquivos de Configuração ==========
 .vscode/
@@ -114,3 +117,4 @@ codex.md
 .env.*.local
 appsettings.Development.json
 secrets.json
+

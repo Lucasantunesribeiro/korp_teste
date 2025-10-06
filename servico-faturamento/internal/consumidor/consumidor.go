@@ -31,7 +31,7 @@ func IniciarConsumidor(db *gorm.DB, handlers *manipulador.Handlers) error {
 	var conn *amqp.Connection
 	var err error
 
-	// retry de conexão
+	// retry de conexao
 	for i := 0; i < 10; i++ {
 		conn, err = amqp.Dial(rabbitURL)
 		if err == nil {
@@ -42,7 +42,7 @@ func IniciarConsumidor(db *gorm.DB, handlers *manipulador.Handlers) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("falha ao conectar RabbitMQ após retries: %w", err)
+		return fmt.Errorf("falha ao conectar RabbitMQ apos retries: %w", err)
 	}
 
 	ch, err := conn.Channel()
@@ -154,11 +154,11 @@ func (c *Consumidor) ProcessarMensagem(msg amqp.Delivery) error {
 
 	log.Printf("Processando mensagem: %s (routing: %s)", idMsg, msg.RoutingKey)
 
-	// verifica idempotência ANTES de fazer qualquer coisa
+	// verifica idempotencia ANTES de fazer qualquer coisa
 	return c.DB.Transaction(func(tx *gorm.DB) error {
 		var existe dominio.MensagemProcessada
 		if err := tx.Where("id_mensagem = ?", idMsg).First(&existe).Error; err == nil {
-			log.Printf("Mensagem %s já processada, ignorando", idMsg)
+			log.Printf("Mensagem %s ja processada, ignorando", idMsg)
 			return nil
 		}
 
@@ -203,7 +203,11 @@ func (c *Consumidor) ProcessarMensagem(msg amqp.Delivery) error {
 
 func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) (bool, error) {
 	var evento struct {
-		NotaID     string `json:"notaId"`
+		NotaID string `json:"notaId"`
+		Itens  []struct {
+			ProdutoID  string `json:"produtoId"`
+			Quantidade int    `json:"quantidade"`
+		} `json:"itens"`
 		ProdutoID  string `json:"produtoId"`
 		Quantidade int    `json:"quantidade"`
 	}
@@ -212,24 +216,50 @@ func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) (bool, 
 		return false, fmt.Errorf("falha ao fazer unmarshal: %w", err)
 	}
 
+	if len(evento.Itens) == 0 && evento.ProdutoID != "" {
+		evento.Itens = append(evento.Itens, struct {
+			ProdutoID  string `json:"produtoId"`
+			Quantidade int    `json:"quantidade"`
+		}{
+			ProdutoID:  evento.ProdutoID,
+			Quantidade: evento.Quantidade,
+		})
+	}
+
+	if len(evento.Itens) == 0 {
+		log.Printf("Evento de estoque reservado sem itens; ignorando")
+		return false, nil
+	}
+
 	notaID, err := uuid.Parse(evento.NotaID)
 	if err != nil {
-		return false, fmt.Errorf("notaId inválido: %w", err)
+		return false, fmt.Errorf("notaId invalido: %w", err)
 	}
 
 	log.Printf("Estoque reservado para nota %s, fechando nota...", notaID)
 
-	// fechar nota usando handler (que já tem lock pessimista)
-	// mas precisamos usar a mesma transação
 	var nota dominio.NotaFiscal
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Preload("Itens").
 		First(&nota, "id = ?", notaID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("Nota %s não encontrada; evento será marcado como ignorado", notaID)
+			log.Printf("Nota %s nao encontrada; evento sera marcado como ignorado", notaID)
 			return false, nil
 		}
 		return false, fmt.Errorf("falha ao buscar nota: %w", err)
+	}
+
+	if nota.Status != dominio.StatusNotaAberta {
+		log.Printf("Nota %s ja esta com status %s; evento sera ignorado", notaID, nota.Status)
+		return false, nil
+	}
+
+	if len(nota.Itens) == 0 {
+		log.Printf("Nota %s recebida sem itens; marcando solicitacao como falha e ignorando mensagem", notaID)
+		if err := c.Handlers.MarcarFalha(notaID, "Nota sem itens nao pode ser fechada"); err != nil {
+			log.Printf("Aviso: falha ao marcar solicitacao como FALHOU para nota %s: %v", notaID, err)
+		}
+		return false, nil
 	}
 
 	if err := nota.Fechar(); err != nil {
@@ -240,15 +270,14 @@ func (c *Consumidor) processarEstoqueReservado(tx *gorm.DB, body []byte) (bool, 
 		return false, fmt.Errorf("falha ao salvar nota: %w", err)
 	}
 
-	// atualizar solicitação
 	agora := time.Now()
 	if err := tx.Model(&dominio.SolicitacaoImpressao{}).
 		Where("nota_id = ? AND status = ?", notaID, "PENDENTE").
 		Updates(map[string]interface{}{
-			"status":          "CONCLUIDA",
+			"status":         "CONCLUIDA",
 			"data_conclusao": agora,
 		}).Error; err != nil {
-		return false, fmt.Errorf("falha ao atualizar solicitação: %w", err)
+		return false, fmt.Errorf("falha ao atualizar solicitacao: %w", err)
 	}
 
 	log.Printf("Nota %s fechada com sucesso", notaID)
@@ -267,21 +296,20 @@ func (c *Consumidor) processarReservaRejeitada(tx *gorm.DB, body []byte) error {
 
 	notaID, err := uuid.Parse(evento.NotaID)
 	if err != nil {
-		return fmt.Errorf("notaId inválido: %w", err)
+		return fmt.Errorf("notaId invalido: %w", err)
 	}
 
 	log.Printf("Reserva rejeitada para nota %s: %s", notaID, evento.Motivo)
 
-	// marcar solicitação como FALHOU
 	if err := tx.Model(&dominio.SolicitacaoImpressao{}).
 		Where("nota_id = ? AND status = ?", notaID, "PENDENTE").
 		Updates(map[string]interface{}{
-			"status":         "FALHOU",
+			"status":        "FALHOU",
 			"mensagem_erro": evento.Motivo,
 		}).Error; err != nil {
-		return fmt.Errorf("falha ao atualizar solicitação: %w", err)
+		return fmt.Errorf("falha ao atualizar solicitacao: %w", err)
 	}
 
-	log.Printf("Solicitação marcada como FALHOU para nota %s", notaID)
+	log.Printf("Solicitacao marcada como FALHOU para nota %s", notaID)
 	return nil
 }

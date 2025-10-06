@@ -9,6 +9,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 $ErrorActionPreference = "Continue"
+$webAppPort = if ([string]::IsNullOrWhiteSpace($env:WEBAPP_PORT)) { 4200 } else { [int]$env:WEBAPP_PORT }
 
 # ETAPA 1: Rebuild de servicos com correcoes
 Write-Host "[1/6] Rebuild dos servicos backend..." -ForegroundColor Yellow
@@ -73,7 +74,7 @@ $services = @(
     @{Name="rabbitmq"; Port=15672; Path="/"},
     @{Name="servico-estoque"; Port=5001; Path="/health"},
     @{Name="servico-faturamento"; Port=5002; Path="/health"},
-    @{Name="web-app"; Port=8080; Path="/"}
+    @{Name="web-app"; Port=$webAppPort; Path="/"}
 )
 
 $allHealthy = $true
@@ -139,7 +140,7 @@ Write-Host "  VALIDACAO CONCLUIDA" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "PROXIMOS PASSOS:" -ForegroundColor Yellow
-Write-Host "1. Acesse o frontend: http://localhost:8080" -ForegroundColor White
+Write-Host "1. Acesse o frontend: http://localhost:$webAppPort" -ForegroundColor White
 Write-Host "2. Teste fluxo manual: criar produto > nota > item > imprimir" -ForegroundColor White
 Write-Host "3. Verifique logs em tempo real: docker logs -f servico-faturamento" -ForegroundColor White
 Write-Host "4. RabbitMQ Management: http://localhost:15672 - admin/admin123" -ForegroundColor White

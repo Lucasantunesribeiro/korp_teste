@@ -1,194 +1,226 @@
-@'
-$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-$API_ESTOQUE = "http://localhost:5001/api/v1"
-$API_FATURAMENTO = "http://localhost:5002/api/v1"
+$ApiEstoque      = 'http://localhost:5001/api/v1'
+$ApiFaturamento  = 'http://localhost:5002/api/v1'
+$SpinnerFrames   = '|/-\\'
 
-function Chamar-Api {
-    param([string]$Metodo, [string]$Url, [object]$Corpo = $null, [hashtable]$Headers = @{})
-    
-    $params = @{ Method = $Metodo; Uri = $Url; Headers = $Headers; ContentType = "application/json" }
-    if ($Corpo) { $params.Body = ($Corpo | ConvertTo-Json -Depth 10) }
-    
-    try { 
-        return Invoke-RestMethod @params 
+function Write-Section {
+    param([string]$Title, [ConsoleColor]$Color = [ConsoleColor]::Cyan)
+    Write-Host "`n=== $Title ===" -ForegroundColor $Color
+}
+
+function Write-Step {
+    param([string]$Message, [ConsoleColor]$Color = [ConsoleColor]::Gray)
+    Write-Host "  • $Message" -ForegroundColor $Color
+}
+
+function Invoke-Api {
+    param(
+        [Parameter(Mandatory)] [ValidateSet('GET','POST','PUT','DELETE')] [string]$Method,
+        [Parameter(Mandatory)] [string]$Uri,
+        [hashtable]$Headers,
+        [object]$Body
+    )
+
+    $params = @{ Method = $Method; Uri = $Uri; ContentType = 'application/json'; ErrorAction = 'Stop' }
+    if ($Headers) { $params.Headers = $Headers }
+    if ($Body)    { $params.Body    = ($Body | ConvertTo-Json -Depth 6) }
+
+    try {
+        return Invoke-RestMethod @params
     }
-    catch { 
-        Write-Host "Erro: $_" -ForegroundColor Red
+    catch {
+        $message = $_.Exception.Message
+        $response = $_.Exception.Response
+        if ($response -and $response.GetResponseStream()) {
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            $reader.BaseStream.Position = 0
+            $reader.DiscardBufferedData()
+            $body = $reader.ReadToEnd()
+            if ($body) {
+                $message = "$message | $body"
+            }
+        }
+        throw [System.Exception]::new("Falha ao chamar $Method $Uri : $message", $_.Exception)
+    }
+}
+
+function Wait-Poll {
+    param(
+        [Parameter(Mandatory)] [scriptblock]$Operation,
+        [int]$TimeoutSeconds = 30,
+        [int]$IntervalSeconds = 1,
+        [string]$WaitingMessage = 'Aguardando...'
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $frameIndex = 0
+    Write-Host "  $WaitingMessage " -NoNewline
+
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $result = & $Operation
+            if ($result) {
+                Write-Host ""
+                return $result
+            }
+        }
+        catch {
+            Write-Host ""
+            throw
+        }
+
+        $frame = $SpinnerFrames[$frameIndex % $SpinnerFrames.Length]
+        Write-Host "`b$frame" -NoNewline
+        $frameIndex++
+        Start-Sleep -Seconds $IntervalSeconds
+    }
+
+    Write-Host ""
+    throw "Timeout apos $TimeoutSeconds segundos."
+}
+
+function Ensure-Produto {
+    param([string]$SkuBase, [string]$Nome, [int]$Saldo)
+
+    $sufixo = Get-Date -Format 'HHmmssfff'
+    $skuFinal = "$SkuBase-$sufixo"
+    return Invoke-Api -Method POST -Uri "$ApiEstoque/produtos" -Body @{ sku = $skuFinal; nome = $Nome; saldo = $Saldo }
+}
+
+function Ensure-Nota {
+    param([string]$NumeroBase)
+
+    $sufixo = Get-Date -Format 'HHmmssfff'
+    $numeroFinal = "$NumeroBase-$sufixo"
+    return Invoke-Api -Method POST -Uri "$ApiFaturamento/notas" -Body @{ numero = $numeroFinal }
+}
+
+function Adicionar-ItemNota {
+    param([Guid]$NotaId, [Guid]$ProdutoId, [int]$Quantidade, [double]$Preco)
+    Invoke-Api -Method POST -Uri "$ApiFaturamento/notas/$NotaId/itens" -Body @{ produtoId = $ProdutoId; quantidade = $Quantidade; precoUnitario = $Preco } | Out-Null
+}
+
+function Solicitar-Impressao {
+    param([Guid]$NotaId)
+    $chave = [guid]::NewGuid().ToString()
+    return Invoke-Api -Method POST -Uri "$ApiFaturamento/notas/$NotaId/imprimir" -Headers @{ 'Idempotency-Key' = $chave }
+}
+
+function Obter-Solicitacao {
+    param([Guid]$Id)
+    return Invoke-Api -Method GET -Uri "$ApiFaturamento/solicitacoes-impressao/$Id"
+}
+
+function Validar-Saldo {
+    param([Guid]$ProdutoId, [int]$SaldoEsperado)
+    $produto = Invoke-Api -Method GET -Uri "$ApiEstoque/produtos/$ProdutoId"
+    if ($produto.saldo -ne $SaldoEsperado) {
+        throw "Saldo inesperado para produto $($produto.sku): encontrado $($produto.saldo), esperado $SaldoEsperado"
+    }
+    Write-Step "Saldo confirmado: $SaldoEsperado" ([ConsoleColor]::Green)
+}
+
+Write-Section 'Demo Sistema NFe - Viasoft Korp' ([ConsoleColor]::Cyan)
+
+Write-Section 'Verificando servicos'
+Write-Step 'Health Estoque' ([ConsoleColor]::Gray)
+Invoke-Api -Method GET -Uri "$ApiEstoque/health" | Out-Null
+Write-Step 'Health Faturamento' ([ConsoleColor]::Gray)
+Invoke-Api -Method GET -Uri "$ApiFaturamento/health" | Out-Null
+
+try {
+    # Cenario 1: Fluxo feliz
+    Write-Section 'Cenario 1 - Fluxo Normal (reserva + impressao)' ([ConsoleColor]::Green)
+    $prod1 = Ensure-Produto -Sku 'DEMO-001' -Nome 'Produto Demo' -Saldo 100
+    $nota1 = Ensure-Nota -Numero 'NFE-001'
+    Write-Step "Produto $($prod1.sku) criado (saldo 100)" ([ConsoleColor]::Green)
+    Write-Step "Nota fiscal $($nota1.numero) criada" ([ConsoleColor]::Green)
+
+    Adicionar-ItemNota -NotaId $nota1.id -ProdutoId $prod1.id -Quantidade 30 -Preco 15.5
+    Write-Step 'Item adicionado (quantidade 30)' ([ConsoleColor]::Gray)
+
+    $sol1 = Solicitar-Impressao -NotaId $nota1.id
+    Write-Step "Solicitacao enviada (ID: $($sol1.id))" ([ConsoleColor]::Cyan)
+
+    $resultado1 = Wait-Poll -WaitingMessage 'Processando impressao' -Operation {
+        $status = Obter-Solicitacao -Id $sol1.id
+        if ($status.status -eq 'CONCLUIDA' -or $status.status -eq 'FALHOU') { return $status }
         return $null
     }
-}
 
-Write-Host "`n=== DEMO Sistema NFe - Viasoft Korp ===`n" -ForegroundColor Cyan
-
-Write-Host "Aguardando servicos iniciarem..." -ForegroundColor Yellow
-Start-Sleep -Seconds 5
-
-# Cenario 1: Fluxo Feliz
-Write-Host "`n--- Cenario 1: Fluxo Normal (Reserva + Impressao) ---`n" -ForegroundColor Green
-
-$prod1 = Chamar-Api POST "$API_ESTOQUE/produtos" @{ sku="DEMO-001"; nome="Produto Demo"; saldo=100 }
-if ($prod1) {
-    Write-Host "* Produto criado: $($prod1.sku) (saldo inicial: 100)" -ForegroundColor Green
-}
-
-$nota1 = Chamar-Api POST "$API_FATURAMENTO/notas" @{ numero="NFE-001" }
-if ($nota1) {
-    Write-Host "* Nota fiscal criada: $($nota1.numero)" -ForegroundColor Green
-}
-
-if ($prod1 -and $nota1) {
-    Chamar-Api POST "$API_FATURAMENTO/notas/$($nota1.id)/itens" @{ 
-        produtoId=$prod1.id; quantidade=30; precoUnitario=15.50 
-    } | Out-Null
-    Write-Host "* Item adicionado (quantidade: 30)" -ForegroundColor Green
-
-    $chave1 = [guid]::NewGuid().ToString()
-    $imp1 = Chamar-Api POST "$API_FATURAMENTO/notas/$($nota1.id)/imprimir" -Headers @{
-        "Idempotency-Key"=$chave1
+    if ($resultado1.status -ne 'CONCLUIDA') {
+        throw "Impressao nao concluiu: status $($resultado1.status)"
     }
-    
-    if ($imp1) {
-        Write-Host "* Impressao iniciada (ID: $($imp1.id)), aguardando..." -NoNewline -ForegroundColor Cyan
+    Write-Step 'Nota impressa com sucesso' ([ConsoleColor]::Green)
+    Validar-Saldo -ProdutoId $prod1.id -SaldoEsperado 70
 
-        $maxTentativas = 30
-        $tentativa = 0
-        $concluida = $false
-
-        while ($tentativa -lt $maxTentativas) {
-            Start-Sleep -Milliseconds 1000
-            $st1 = Chamar-Api GET "$API_FATURAMENTO/solicitacoes-impressao/$($imp1.id)"
-            
-            if ($st1.status -ne "PENDENTE") {
-                Write-Host ""
-                if ($st1.status -eq "CONCLUIDA") {
-                    Write-Host "* Nota impressa com sucesso!" -ForegroundColor Green
-                    $concluida = $true
-                } else {
-                    Write-Host "X Falhou: $($st1.mensagemErro)" -ForegroundColor Red
-                }
-                break
-            }
-            
-            Write-Host "." -NoNewline
-            $tentativa++
-        }
-
-        if (-not $concluida -and $tentativa -ge $maxTentativas) {
-            Write-Host "`n! Timeout aguardando conclusao" -ForegroundColor Yellow
-        }
-
-        Start-Sleep -Seconds 2
-        $prodFinal = Chamar-Api GET "$API_ESTOQUE/produtos/$($prod1.id)"
-        if ($prodFinal) {
-            $esperado = 70
-            if ($prodFinal.saldo -eq $esperado) {
-                Write-Host "* Saldo atualizado corretamente: $($prodFinal.saldo) (esperado: $esperado)" -ForegroundColor Green
-            } else {
-                Write-Host "! Saldo incorreto: $($prodFinal.saldo) (esperado: $esperado)" -ForegroundColor Yellow
-            }
-        }
-    }
-}
-
-# Cenario 2: Saldo Insuficiente
-Write-Host "`n--- Cenario 2: Saldo Insuficiente ---`n" -ForegroundColor Yellow
-
-$prod2 = Chamar-Api POST "$API_ESTOQUE/produtos" @{ sku="DEMO-002"; nome="Produto Limitado"; saldo=10 }
-if ($prod2) {
-    Write-Host "* Produto criado com saldo baixo: $($prod2.saldo)" -ForegroundColor Yellow
-}
-
-$nota2 = Chamar-Api POST "$API_FATURAMENTO/notas" @{ numero="NFE-002" }
-if ($nota2 -and $prod2) {
-    Chamar-Api POST "$API_FATURAMENTO/notas/$($nota2.id)/itens" @{ 
-        produtoId=$prod2.id; quantidade=50; precoUnitario=25 
-    } | Out-Null
-    Write-Host "* Item adicionado (quantidade solicitada: 50 > saldo: 10)" -ForegroundColor Yellow
-
-    $chave2 = [guid]::NewGuid().ToString()
-    $imp2 = Chamar-Api POST "$API_FATURAMENTO/notas/$($nota2.id)/imprimir" -Headers @{
-        "Idempotency-Key"=$chave2
+    # Cenario 2: Saldo insuficiente
+    Write-Section 'Cenario 2 - Saldo insuficiente' ([ConsoleColor]::Yellow)
+    $prod2 = Ensure-Produto -Sku 'DEMO-002' -Nome 'Produto Limitado' -Saldo 10
+    $nota2 = Ensure-Nota -Numero 'NFE-002'
+    Adicionar-ItemNota -NotaId $nota2.id -ProdutoId $prod2.id -Quantidade 50 -Preco 25
+    $sol2 = Solicitar-Impressao -NotaId $nota2.id
+    $resultado2 = Wait-Poll -WaitingMessage 'Aguardando rejeicao' -Operation {
+        $status = Obter-Solicitacao -Id $sol2.id
+        if ($status.status -ne 'PENDENTE') { return $status }
+        return $null
     }
 
-    if ($imp2) {
-        Write-Host "* Impressao iniciada, aguardando rejeicao..." -NoNewline
-
-        Start-Sleep -Seconds 5
-        $st2 = Chamar-Api GET "$API_FATURAMENTO/solicitacoes-impressao/$($imp2.id)"
-        
-        Write-Host ""
-        if ($st2.status -eq "FALHOU") {
-            Write-Host "* Rejeicao detectada: $($st2.mensagemErro)" -ForegroundColor Green
-        } else {
-            Write-Host "! Status inesperado: $($st2.status)" -ForegroundColor Yellow
-        }
+    if ($resultado2.status -ne 'FALHOU') {
+        throw "Esperava falha por saldo insuficiente, recebeu $($resultado2.status)"
     }
-}
+    Write-Step "Rejeicao confirmada: $($resultado2.mensagemErro)" ([ConsoleColor]::Green)
+    Validar-Saldo -ProdutoId $prod2.id -SaldoEsperado 10
 
-# Cenario 3: Idempotencia
-Write-Host "`n--- Cenario 3: Idempotencia (mesma chave 2x) ---`n" -ForegroundColor Magenta
+    # Cenario 3: Idempotencia
+    Write-Section 'Cenario 3 - Idempotencia' ([ConsoleColor]::Magenta)
+    $prod3 = Ensure-Produto -Sku 'DEMO-003' -Nome 'Produto Idempotencia' -Saldo 40
+    $nota3 = Ensure-Nota -Numero 'NFE-003'
+    Adicionar-ItemNota -NotaId $nota3.id -ProdutoId $prod3.id -Quantidade 20 -Preco 10
 
-$prod3 = Chamar-Api POST "$API_ESTOQUE/produtos" @{ sku="DEMO-003"; nome="Produto Concorrencia"; saldo=40 }
-$nota3 = Chamar-Api POST "$API_FATURAMENTO/notas" @{ numero="NFE-003" }
-
-if ($prod3 -and $nota3) {
-    Chamar-Api POST "$API_FATURAMENTO/notas/$($nota3.id)/itens" @{ 
-        produtoId=$prod3.id; quantidade=20; precoUnitario=10 
-    } | Out-Null
-
-    $chaveDuplicada = [guid]::NewGuid().ToString()
-    Write-Host "Disparando 2 requisicoes com MESMA chave de idempotencia..." -ForegroundColor Magenta
-
-    $resp1 = Chamar-Api POST "$API_FATURAMENTO/notas/$($nota3.id)/imprimir" -Headers @{
-        "Idempotency-Key"=$chaveDuplicada
-    }
-
+    $chave = [guid]::NewGuid().ToString()
+    $resp1 = Invoke-Api -Method POST -Uri "$ApiFaturamento/notas/$($nota3.id)/imprimir" -Headers @{ 'Idempotency-Key' = $chave }
     Start-Sleep -Milliseconds 500
-    $resp2 = Chamar-Api POST "$API_FATURAMENTO/notas/$($nota3.id)/imprimir" -Headers @{
-        "Idempotency-Key"=$chaveDuplicada
-    }
+    $resp2 = Invoke-Api -Method POST -Uri "$ApiFaturamento/notas/$($nota3.id)/imprimir" -Headers @{ 'Idempotency-Key' = $chave }
 
-    if ($resp1 -and $resp2) {
-        if ($resp1.id -eq $resp2.id) {
-            Write-Host "* Idempotencia OK - Ambas retornaram mesmo ID: $($resp1.id)" -ForegroundColor Green
-        } else {
-            Write-Host "X Idempotencia FALHOU - IDs diferentes: $($resp1.id) vs $($resp2.id)" -ForegroundColor Red
+    if ($resp1.id -ne $resp2.id) {
+        throw "Idempotencia violada: IDs diferentes ($($resp1.id) vs $($resp2.id))"
+    }
+    Write-Step "Mesmo ID retornado para requisicoes duplicadas: $($resp1.id)" ([ConsoleColor]::Green)
+
+    # Cenario 4: Rollback manual (X-Demo-Fail)
+    Write-Section 'Cenario 4 - Rollback com X-Demo-Fail' ([ConsoleColor]::Red)
+    $prod4 = Ensure-Produto -Sku 'DEMO-004' -Nome 'Produto Rollback' -Saldo 50
+    $nota4 = Ensure-Nota -Numero 'NFE-004'
+    Write-Step "Produto rollback: $($prod4.sku) ($($prod4.id))" ([ConsoleColor]::Gray)
+    Write-Step "Nota rollback: $($nota4.numero) ($($nota4.id))" ([ConsoleColor]::Gray)
+
+    $bodyRollback = @{ notaId = $nota4.id; produtoId = $prod4.id; quantidade = 20 }
+    try {
+        Invoke-Api -Method POST -Uri "$ApiEstoque/reservas" -Headers @{ 'X-Demo-Fail' = 'true' } -Body $bodyRollback | Out-Null
+        throw 'Reserva com X-Demo-Fail nao deveria retornar sucesso.'
+    }
+    catch {
+        if (-not $_.Exception.Message.Contains('Falha simulada')) {
+            throw
         }
+        Write-Step 'Falha simulada detectada conforme esperado' ([ConsoleColor]::Green)
     }
+
+    Start-Sleep -Seconds 2
+    Validar-Saldo -ProdutoId $prod4.id -SaldoEsperado 50
+
+    Write-Section 'Resumo' ([ConsoleColor]::Cyan)
+    Write-Step 'Fluxo feliz: sucesso com baixa de estoque' ([ConsoleColor]::Green)
+    Write-Step 'Saldo insuficiente: rejeicao protegida' ([ConsoleColor]::Green)
+    Write-Step 'Idempotencia: chave repetida retorna mesma solicitacao' ([ConsoleColor]::Green)
+    Write-Step 'Rollback: X-Demo-Fail preserva saldo' ([ConsoleColor]::Green)
+
+    Write-Host "`nDemo concluida com sucesso" -ForegroundColor Green
 }
-
-# Cenario 4: Rollback com X-Demo-Fail
-Write-Host "`n--- Cenario 4: Rollback com X-Demo-Fail ---`n" -ForegroundColor Red
-
-$prod4 = Chamar-Api POST "$API_ESTOQUE/produtos" @{ sku="DEMO-004"; nome="Produto Rollback"; saldo=50 }
-if ($prod4) {
-    Write-Host "* Produto criado (saldo: 50)" -ForegroundColor Red
-
-    Write-Host "Tentando reserva com header X-Demo-Fail..." -ForegroundColor Red
-    
-    $nota4 = Chamar-Api POST "$API_FATURAMENTO/notas" @{ numero="NFE-004" }
-    if ($nota4) {
-        $result = Chamar-Api POST "$API_ESTOQUE/reservas" @{ 
-            notaId=$nota4.id; produtoId=$prod4.id; quantidade=20 
-        } -Headers @{ "X-Demo-Fail"="true" }
-
-        Start-Sleep -Seconds 2
-        
-        $prod4Final = Chamar-Api GET "$API_ESTOQUE/produtos/$($prod4.id)"
-        if ($prod4Final.saldo -eq 50) {
-            Write-Host "* Rollback OK - Saldo permanece: 50" -ForegroundColor Green
-        } else {
-            Write-Host "X Rollback FALHOU - Saldo: $($prod4Final.saldo)" -ForegroundColor Red
-        }
-    }
+catch {
+    Write-Host "`nERRO: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
 }
-
-Write-Host "`n=== Demo Concluida ===`n" -ForegroundColor Cyan
-Write-Host "Resumo dos cenarios testados:" -ForegroundColor White
-Write-Host "1. Fluxo feliz: Reserva -> Impressao -> Baixa estoque" -ForegroundColor Green
-Write-Host "2. Saldo insuficiente: Rejeicao detectada" -ForegroundColor Yellow
-Write-Host "3. Idempotencia: Mesma chave retorna mesmo resultado" -ForegroundColor Magenta
-Write-Host "4. Rollback: X-Demo-Fail nao persiste mudancas" -ForegroundColor Red
-Write-Host ""
-'@ | Out-File -FilePath .\scripts\demo-fixed.ps1 -Encoding UTF8

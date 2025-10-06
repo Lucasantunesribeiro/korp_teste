@@ -1,70 +1,109 @@
-Clear-Host
-Write-Host "=== TESTE CONCORRÊNCIA - RESERVA DE ESTOQUE ===" -ForegroundColor Cyan
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Net.Http
 
-$estoqueApi = "http://localhost:5001/api/v1"
+$ApiEstoque = 'http://localhost:5001/api/v1'
+
+function Write-Info {
+    param([string]$Message, [ConsoleColor]$Color = [ConsoleColor]::Gray)
+    Write-Host $Message -ForegroundColor $Color
+}
+
+function Invoke-RawRequest {
+    param(
+        [string]$Uri,
+        [object]$Body
+    )
+
+    $params = @{
+        Method             = 'POST'
+        Uri                = $Uri
+        Body               = ($Body | ConvertTo-Json -Depth 4)
+        ContentType        = 'application/json'
+        SkipHttpErrorCheck = $true
+        ErrorAction        = 'Stop'
+    }
+
+    $response = Invoke-WebRequest @params
+
+    $parsed = $null
+    if ($response.Content) {
+        try { $parsed = $response.Content | ConvertFrom-Json }
+        catch { $parsed = $response.Content }
+    }
+
+    [pscustomobject]@{
+        StatusCode = [int]$response.StatusCode
+        Content    = $parsed
+    }
+}
+
+Write-Info '=== Teste de Concorrencia - Reservas simultaneas ===' ([ConsoleColor]::Cyan)
+
+$sku = "CONC-$(Get-Date -Format 'HHmmss')"
+$produto = Invoke-WebRequest -Method POST -Uri "$ApiEstoque/produtos" -ContentType 'application/json' -Body (@{
+        sku   = $sku
+        nome  = 'Produto Concurrency'
+        saldo = 5
+    } | ConvertTo-Json -Depth 3)
+$produtoJson = $produto.Content | ConvertFrom-Json
+Write-Info "Produto criado: $($produtoJson.sku) | Saldo inicial: $($produtoJson.saldo)" ([ConsoleColor]::Green)
+
+$notaId = [guid]::NewGuid()
+$body   = @{ notaId = $notaId; produtoId = $produtoJson.id; quantidade = 3 }
+
+Write-Info 'Disparando duas reservas simultaneas (quantidade 3 cada)...' ([ConsoleColor]::Gray)
+
+$payloadJson = $body | ConvertTo-Json -Depth 4
+$uriReservas = "$ApiEstoque/reservas"
+$httpClient  = [System.Net.Http.HttpClient]::new()
 
 try {
-    $produto = Invoke-RestMethod -Method Post -Uri "$estoqueApi/produtos" -ContentType "application/json" -Body (@{
-        sku   = "CONC-" + (Get-Date -Format "HHmmss")
-        nome  = "Produto Concurrency"
-        saldo = 5
-    } | ConvertTo-Json)
-}
-catch {
-    Write-Host "Falha ao criar produto base: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
+    $tasks = @(
+        $httpClient.PostAsync($uriReservas, (New-Object System.Net.Http.StringContent($payloadJson, [System.Text.Encoding]::UTF8, 'application/json'))),
+        $httpClient.PostAsync($uriReservas, (New-Object System.Net.Http.StringContent($payloadJson, [System.Text.Encoding]::UTF8, 'application/json')))
+    )
 
-Write-Host "Produto criado: $($produto.sku) | Saldo inicial: $($produto.saldo)" -ForegroundColor Yellow
-$notaId = [guid]::NewGuid().ToString()
-$body   = @{ notaId = $notaId; produtoId = $produto.id; quantidade = 3 } | ConvertTo-Json
+    [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]$tasks)
 
-Write-Host "`nDisparando duas reservas concorrentes (quantidade=3) para o mesmo produto..." -ForegroundColor Yellow
+    $responses = $tasks | ForEach-Object { $_.Result }
+    $results = foreach ($response in $responses) {
+        $contentString = $response.Content.ReadAsStringAsync().Result
+        $parsed = $null
+        if ($contentString) {
+            try { $parsed = $contentString | ConvertFrom-Json }
+            catch { $parsed = $contentString }
+        }
 
-$scriptBlock = {
-    param($url, $body)
-    try {
-        $resp = Invoke-RestMethod -Method Post -Uri $url -Body $body -ContentType "application/json" -ErrorAction Stop
         [pscustomobject]@{
-            Sucesso    = $true
-            StatusCode = 200
-            Conteudo   = $resp
+            StatusCode = [int]$response.StatusCode
+            Content    = $parsed
         }
     }
-    catch {
-        $webResp = $_.Exception.Response
-        $status  = $webResp.StatusCode.value__
-        $reader  = New-Object System.IO.StreamReader($webResp.GetResponseStream())
-        $content = $reader.ReadToEnd()
-        [pscustomobject]@{
-            Sucesso    = $false
-            StatusCode = $status
-            Conteudo   = $content
-        }
-    }
+    $responses | ForEach-Object { $_.Dispose() }
 }
-
-$jobs = 1..2 | ForEach-Object {
-    Start-Job -ScriptBlock $scriptBlock -ArgumentList "$estoqueApi/reservas", $body
+finally {
+    $httpClient.Dispose()
 }
-
-Wait-Job -Job $jobs | Out-Null
-$results = $jobs | ForEach-Object { Receive-Job $_ }
-$jobs | Remove-Job
 
 foreach ($result in $results) {
-    $outcome = if ($result.Sucesso) { "SUCESSO" } else { "FALHA" }
-    $color   = if ($result.Sucesso) { "Green" } else { "Red" }
-    Write-Host "  -> $outcome | Status $($result.StatusCode)" -ForegroundColor $color
+    $status = if ($result.StatusCode -ge 200 -and $result.StatusCode -lt 300) { 'SUCESSO' } else { 'FALHA' }
+    $color  = if ($status -eq 'SUCESSO') { [ConsoleColor]::Green } else { [ConsoleColor]::Red }
+    Write-Info ("  -> {0} | HTTP {1}" -f $status, $result.StatusCode) $color
 }
 
-$produtoFinal = Invoke-RestMethod -Uri "$estoqueApi/produtos/$($produto.id)"
-$saldoFinal   = [int]$produtoFinal.saldo
+$sucessos = @($results | Where-Object { $_.StatusCode -ge 200 -and $_.StatusCode -lt 300 })
+$falhas   = @($results | Where-Object { $_.StatusCode -ge 400 })
 
-Write-Host "`nSaldo final do produto: $saldoFinal" -ForegroundColor Cyan
-
-if ($saldoFinal -eq 2) {
-    Write-Host "CONCORRÊNCIA OK: apenas uma reserva concluiu, a outra foi rejeitada." -ForegroundColor Green
-} else {
-    Write-Host "ATENÇÃO: saldo final inesperado. Verificar logs para entender o comportamento." -ForegroundColor Red
+if ($sucessos.Count -ne 1 -or $falhas.Count -ne 1) {
+    throw "Esperava exatamente 1 sucesso e 1 falha. Obtidos: $($sucessos.Count) sucesso(s) / $($falhas.Count) falha(s)."
 }
+
+$produtoFinal = Invoke-RestMethod -Method GET -Uri "$ApiEstoque/produtos/$($produtoJson.id)"
+Write-Info "Saldo final do produto: $($produtoFinal.saldo)" ([ConsoleColor]::Yellow)
+
+if ($produtoFinal.saldo -ne 2) {
+    throw "Saldo final inesperado. Esperado 2, obtido $($produtoFinal.saldo)."
+}
+
+Write-Info 'Concorrencia OK: uma reserva foi efetivada e a outra rejeitada.' ([ConsoleColor]::Green)

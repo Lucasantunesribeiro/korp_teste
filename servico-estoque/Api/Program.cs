@@ -60,5 +60,6 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/api/v1/health", () => Results.Ok(new { status = "ok" }));
 
 app.Run();

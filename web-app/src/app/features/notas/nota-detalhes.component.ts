@@ -2,7 +2,8 @@ import { Component, OnInit, OnDestroy, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { FormsModule } from '@angular/forms';
-import { interval, switchMap, takeWhile, timeout, catchError, of, Subscription } from 'rxjs';
+import { timer, switchMap, takeWhile, timeout, catchError, of, Subscription } from 'rxjs';
+import { finalize } from 'rxjs/operators';
 import { NotaFiscalService } from '../../core/services/nota-fiscal.service';
 import { ProdutoService } from '../../core/services/produto.service';
 import { IdempotenciaService } from '../../core/services/idempotencia.service';
@@ -14,52 +15,73 @@ import { Produto } from '../../core/models/produto.model';
   standalone: true,
   imports: [CommonModule, FormsModule, RouterLink],
   template: `
-    <div class="container mx-auto px-4 py-8">
+    <div class="container mx-auto px-4 py-8 max-w-5xl">
       <div class="mb-6">
         <a routerLink="/notas" class="text-blue-600 hover:text-blue-800 flex items-center gap-2">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
           </svg>
           Voltar para lista
         </a>
       </div>
 
       @if (carregando()) {
-        <div class="text-center py-8">
-          <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          <p class="mt-2 text-gray-600">Carregando nota...</p>
+        <div class="bg-white border rounded-lg shadow-sm p-6">
+          <div class="animate-pulse space-y-4">
+            <div class="h-6 bg-slate-200 rounded"></div>
+            <div class="h-4 bg-slate-200 rounded w-1/2"></div>
+            <div class="h-4 bg-slate-100 rounded"></div>
+            <div class="h-48 bg-slate-100 rounded"></div>
+          </div>
         </div>
       }
 
       @if (nota()) {
-        <div class="bg-white border rounded-lg p-6 shadow-sm mb-6">
-          <div class="flex justify-between items-start mb-4">
+        <div class="bg-white border rounded-lg p-6 shadow-sm mb-6 transition-transform duration-300">
+          <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
             <div>
-              <h1 class="text-2xl font-bold text-gray-800">{{ nota()!.numero }}</h1>
+              <h1 class="text-3xl font-bold text-gray-800">{{ nota()!.numero }}</h1>
               <p class="text-sm text-gray-600 mt-1">ID: {{ nota()!.id }}</p>
+              <p class="text-sm text-gray-600">Criada em {{ nota()!.dataCriacao | date:'dd/MM/yyyy HH:mm' }}</p>
             </div>
-            <span class="px-3 py-1 rounded-full text-sm font-medium"
-                  [class.bg-yellow-100]="nota()!.status === 'ABERTA'"
-                  [class.text-yellow-800]="nota()!.status === 'ABERTA'"
-                  [class.bg-green-100]="nota()!.status === 'FECHADA'"
-                  [class.text-green-800]="nota()!.status === 'FECHADA'">
+            <span class="px-3 py-1 rounded-full text-sm font-medium self-start"
+                  [ngClass]="{
+                    'bg-yellow-100 text-yellow-800': nota()!.status === 'ABERTA',
+                    'bg-green-100 text-green-800': nota()!.status === 'FECHADA'
+                  }">
               {{ nota()!.status }}
             </span>
           </div>
 
-          <div class="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <span class="text-gray-600">Data Criação:</span>
-              <span class="ml-2 font-medium">{{ nota()!.dataCriacao | date:'dd/MM/yyyy HH:mm' }}</span>
+          @if (nota()!.dataFechada) {
+            <div class="text-sm text-gray-600 mt-4">
+              Fechada em {{ nota()!.dataFechada | date:'dd/MM/yyyy HH:mm' }}
             </div>
-            @if (nota()!.dataFechada) {
-              <div>
-                <span class="text-gray-600">Data Fechamento:</span>
-                <span class="ml-2 font-medium">{{ nota()!.dataFechada | date:'dd/MM/yyyy HH:mm' }}</span>
-              </div>
-            }
-          </div>
+          }
         </div>
+
+        @if (statusImpressao() === 'aguardando') {
+          <div class="mb-4 bg-blue-50 border border-blue-200 text-blue-700 rounded-lg p-4 flex items-center gap-3">
+            <div class="h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            <span>Processando impressão... assim que o estoque confirmar, a nota será fechada.</span>
+          </div>
+        }
+
+        @if (statusImpressao() === 'sucesso') {
+          <div class="mb-4 bg-green-50 border border-green-200 text-green-800 rounded-lg p-4 flex items-center gap-3">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+            <span>Nota impressa com sucesso! Estoque atualizado e solicitação concluída.</span>
+          </div>
+        }
+
+        @if (statusImpressao() === 'falha') {
+          <div class="mb-4 bg-red-50 border border-red-200 text-red-800 rounded-lg p-4">
+            <div class="font-semibold mb-1">Falha ao processar a impressão</div>
+            <p>{{ mensagemErro() }}</p>
+          </div>
+        }
 
         <!-- Itens da Nota -->
         <div class="bg-white border rounded-lg p-6 shadow-sm mb-6">
@@ -70,7 +92,7 @@ import { Produto } from '../../core/models/produto.model';
               <table class="w-full text-sm">
                 <thead class="bg-gray-50 border-b">
                   <tr>
-                    <th class="text-left p-3">Produto ID</th>
+                    <th class="text-left p-3">Produto</th>
                     <th class="text-right p-3">Quantidade</th>
                     <th class="text-right p-3">Preço Unit.</th>
                     <th class="text-right p-3">Subtotal</th>
@@ -78,7 +100,7 @@ import { Produto } from '../../core/models/produto.model';
                 </thead>
                 <tbody>
                   @for (item of nota()!.itens; track item.id) {
-                    <tr class="border-b">
+                    <tr class="border-b hover:bg-gray-50 transition">
                       <td class="p-3 font-mono text-xs">{{ item.produtoId }}</td>
                       <td class="p-3 text-right">{{ item.quantidade }}</td>
                       <td class="p-3 text-right">R$ {{ item.precoUnitario | number:'1.2-2' }}</td>
@@ -97,7 +119,7 @@ import { Produto } from '../../core/models/produto.model';
               </table>
             </div>
           } @else {
-            <p class="text-gray-500 text-center py-4">Nenhum item adicionado</p>
+            <p class="text-gray-500 text-center py-4">Nenhum item adicionado.</p>
           }
         </div>
 
@@ -106,93 +128,79 @@ import { Produto } from '../../core/models/produto.model';
           <div class="bg-white border rounded-lg p-6 shadow-sm mb-6">
             <h2 class="text-xl font-semibold mb-4">Adicionar Item</h2>
 
-            <form (ngSubmit)="adicionarItem()" #form="ngForm">
+            <form (ngSubmit)="adicionarItem()" #form="ngForm" class="space-y-4">
               <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Produto</label>
-                  <select
-                    [(ngModel)]="novoItem.produtoId"
-                    name="produtoId"
-                    required
-                    class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                  <select class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring focus:ring-blue-200"
+                          name="produto"
+                          required
+                          [(ngModel)]="novoItem.produtoId">
                     <option value="">Selecione...</option>
                     @for (produto of produtos(); track produto.id) {
-                      <option [value]="produto.id">{{ produto.nome }} ({{ produto.sku }})</option>
+                      <option [value]="produto.id">{{ produto.nome }} (Saldo {{ produto.saldo }})</option>
                     }
                   </select>
                 </div>
-
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Quantidade</label>
-                  <input
-                    type="number"
-                    [(ngModel)]="novoItem.quantidade"
-                    name="quantidade"
-                    required
-                    min="1"
-                    class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                  />
+                  <input type="number" min="1" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring focus:ring-blue-200"
+                         name="quantidade"
+                         required
+                         [(ngModel)]="novoItem.quantidade" />
                 </div>
-
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">Preço Unitário</label>
-                  <input
-                    type="number"
-                    [(ngModel)]="novoItem.precoUnitario"
-                    name="precoUnitario"
-                    required
-                    min="0"
-                    step="0.01"
-                    class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                  />
+                  <input type="number" min="0" step="0.01" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring focus:ring-blue-200"
+                         name="preco"
+                         required
+                         [(ngModel)]="novoItem.precoUnitario" />
                 </div>
               </div>
 
               @if (erroItem()) {
-                <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-                  <p class="text-sm text-red-800">{{ erroItem() }}</p>
+                <div class="bg-red-50 text-red-700 border border-red-200 rounded-lg px-3 py-2">
+                  {{ erroItem() }}
                 </div>
               }
 
-              <button
-                type="submit"
-                [disabled]="!form.valid || adicionandoItem()"
-                class="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition">
-                {{ adicionandoItem() ? 'Adicionando...' : 'Adicionar Item' }}
+              <button type="submit"
+                      class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-60"
+                      [disabled]="adicionandoItem()">
+                @if (adicionandoItem()) {
+                  <span class="inline-flex items-center gap-2">
+                    <span class="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                    Salvando...
+                  </span>
+                } @else {
+                  Adicionar Item
+                }
               </button>
             </form>
           </div>
-
-          <!-- Botão Imprimir -->
-          <div class="bg-white border rounded-lg p-6 shadow-sm">
-            <h2 class="text-xl font-semibold mb-4">Impressão</h2>
-
-            @if (statusImpressao() === 'aguardando') {
-              <div class="flex items-center gap-3 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                <p class="text-blue-800">Processando impressão... aguarde</p>
-              </div>
-            } @else if (statusImpressao() === 'sucesso') {
-              <div class="p-4 bg-green-50 border border-green-200 rounded-lg">
-                <p class="text-green-800 font-medium">✓ Nota impressa com sucesso!</p>
-              </div>
-            } @else if (statusImpressao() === 'falha') {
-              <div class="p-4 bg-red-50 border border-red-200 rounded-lg">
-                <p class="text-red-800 font-medium">✗ Falha na impressão: {{ mensagemErro() }}</p>
-              </div>
-            } @else {
-              <button
-                (click)="solicitarImpressao()"
-                [disabled]="!nota()!.itens || nota()!.itens!.length === 0"
-                class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition font-medium">
-                🖨️ Solicitar Impressão
-              </button>
-              @if (!nota()!.itens || nota()!.itens!.length === 0) {
-                <p class="text-sm text-gray-500 mt-2">Adicione ao menos um item para imprimir</p>
-              }
-            }
-          </div>
         }
+
+        <!-- Solicitar Impressão -->
+        <div class="bg-white border rounded-lg p-6 shadow-sm">
+          <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">Solicitar impressão</h2>
+              <p class="text-sm text-gray-600">Será gerado um evento de reserva; acompanhe o status abaixo.</p>
+            </div>
+            <button class="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition disabled:opacity-60"
+                    (click)="solicitarImpressao()"
+                    [disabled]="statusImpressao() === 'aguardando'">
+              @if (statusImpressao() === 'aguardando') {
+                <span class="inline-flex items-center gap-2">
+                  <span class="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                  Processando...
+                </span>
+              } @else {
+                Solicitar Impressão
+              }
+            </button>
+          </div>
+        </div>
       }
     </div>
   `
@@ -229,28 +237,34 @@ export class NotaDetalhesComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.stopPolling();
+  }
+
+  private stopPolling(): void {
     this.pollingSub?.unsubscribe();
+    this.pollingSub = undefined;
   }
 
   carregarNota(id: string): void {
     this.carregando.set(true);
-    this.notaService.buscarNota(id).subscribe({
-      next: (nota) => {
-        this.nota.set(nota);
-        this.carregando.set(false);
-      },
-      error: (err) => {
-        console.error('Erro ao carregar nota:', err);
-        this.carregando.set(false);
-      }
-    });
+    this.notaService.buscarNota(id)
+      .pipe(finalize(() => this.carregando.set(false)))
+      .subscribe({
+        next: (nota) => this.nota.set(nota),
+        error: (err) => {
+          console.error('Erro ao carregar nota:', err);
+          this.router.navigate(['/notas']);
+        }
+      });
   }
 
   carregarProdutos(): void {
-    this.produtoService.listarProdutos().subscribe({
-      next: (produtos) => this.produtos.set(produtos),
-      error: (err) => console.error('Erro ao carregar produtos:', err)
-    });
+    this.produtoService.listarProdutos()
+      .pipe(finalize(() => this.carregando.set(false)))
+      .subscribe({
+        next: (produtos) => this.produtos.set(produtos),
+        error: (err) => console.error('Erro ao carregar produtos:', err)
+      });
   }
 
   adicionarItem(): void {
@@ -260,17 +274,17 @@ export class NotaDetalhesComponent implements OnInit, OnDestroy {
     this.erroItem.set(null);
     this.adicionandoItem.set(true);
 
-    this.notaService.adicionarItem(notaId, this.novoItem).subscribe({
-      next: () => {
-        this.adicionandoItem.set(false);
-        this.novoItem = { produtoId: '', quantidade: 1, precoUnitario: 0 };
-        this.carregarNota(notaId);
-      },
-      error: (err) => {
-        this.adicionandoItem.set(false);
-        this.erroItem.set(err.error?.erro || 'Erro ao adicionar item');
-      }
-    });
+    this.notaService.adicionarItem(notaId, this.novoItem)
+      .pipe(finalize(() => this.adicionandoItem.set(false)))
+      .subscribe({
+        next: () => {
+          this.novoItem = { produtoId: '', quantidade: 1, precoUnitario: 0 };
+          this.carregarNota(notaId);
+        },
+        error: (err) => {
+          this.erroItem.set(err.error?.erro || 'Erro ao adicionar item');
+        }
+      });
   }
 
   solicitarImpressao(): void {
@@ -282,9 +296,7 @@ export class NotaDetalhesComponent implements OnInit, OnDestroy {
     this.mensagemErro.set(null);
 
     this.notaService.imprimirNota(notaId, chave).subscribe({
-      next: (resposta) => {
-        this.iniciarPolling(resposta.id);
-      },
+      next: (resposta) => this.iniciarPolling(resposta.id),
       error: (err) => {
         this.statusImpressao.set('falha');
         this.mensagemErro.set(err.error?.erro || 'Erro ao solicitar impressão');
@@ -293,7 +305,9 @@ export class NotaDetalhesComponent implements OnInit, OnDestroy {
   }
 
   iniciarPolling(solicitacaoId: string): void {
-    this.pollingSub = interval(1000).pipe(
+    this.stopPolling();
+
+    this.pollingSub = timer(0, 1000).pipe(
       switchMap(() => this.notaService.consultarStatusImpressao(solicitacaoId)),
       timeout(30000),
       takeWhile((sol) => sol.status === 'PENDENTE', true),
@@ -301,13 +315,15 @@ export class NotaDetalhesComponent implements OnInit, OnDestroy {
         this.statusImpressao.set('falha');
         this.mensagemErro.set('Timeout aguardando resposta');
         return of(null);
-      })
+      }),
+      finalize(() => this.pollingSub = undefined)
     ).subscribe({
       next: (sol) => {
         if (!sol) return;
 
         if (sol.status === 'CONCLUIDA') {
           this.statusImpressao.set('sucesso');
+          this.mensagemErro.set(null);
           this.carregarNota(this.nota()!.id);
         } else if (sol.status === 'FALHOU') {
           this.statusImpressao.set('falha');

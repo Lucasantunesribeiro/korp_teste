@@ -2,6 +2,7 @@ package manipulador
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -48,8 +49,7 @@ func (h *Handlers) ListarNotas(c *gin.Context) {
 	var notas []dominio.NotaFiscal
 
 	query := h.DB.Preload("Itens")
-	
-	// filtro opcional por status
+
 	if status := c.Query("status"); status != "" {
 		query = query.Where("status = ?", status)
 	}
@@ -66,14 +66,14 @@ func (h *Handlers) ListarNotas(c *gin.Context) {
 func (h *Handlers) BuscarNota(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID inválido"})
+		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID invalido"})
 		return
 	}
 
 	var nota dominio.NotaFiscal
 	if err := h.DB.Preload("Itens").First(&nota, "id = ?", id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"erro": "Nota não encontrada"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"erro": "Nota nao encontrada"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar nota"})
@@ -87,7 +87,7 @@ func (h *Handlers) BuscarNota(c *gin.Context) {
 func (h *Handlers) AdicionarItem(c *gin.Context) {
 	notaID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID inválido"})
+		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID invalido"})
 		return
 	}
 
@@ -104,15 +104,14 @@ func (h *Handlers) AdicionarItem(c *gin.Context) {
 
 	prodID, err := uuid.Parse(req.ProdutoID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"erro": "ProdutoID inválido"})
+		c.JSON(http.StatusBadRequest, gin.H{"erro": "ProdutoID invalido"})
 		return
 	}
 
-	// verificar se nota existe e está aberta
 	var nota dominio.NotaFiscal
 	if err := h.DB.First(&nota, "id = ?", notaID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"erro": "Nota não encontrada"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"erro": "Nota nao encontrada"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar nota"})
@@ -120,7 +119,7 @@ func (h *Handlers) AdicionarItem(c *gin.Context) {
 	}
 
 	if nota.Status != dominio.StatusNotaAberta {
-		c.JSON(http.StatusConflict, gin.H{"erro": "Nota não está aberta"})
+		c.JSON(http.StatusConflict, gin.H{"erro": "Nota nao esta aberta"})
 		return
 	}
 
@@ -143,29 +142,26 @@ func (h *Handlers) AdicionarItem(c *gin.Context) {
 func (h *Handlers) ImprimirNota(c *gin.Context) {
 	notaID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID inválido"})
+		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID invalido"})
 		return
 	}
 
 	chaveIdem := c.GetHeader("Idempotency-Key")
 	if chaveIdem == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"erro": "Header Idempotency-Key obrigatório"})
+		c.JSON(http.StatusBadRequest, gin.H{"erro": "Header Idempotency-Key obrigatorio"})
 		return
 	}
 
-	// verificar se já existe solicitação com essa chave (idempotência)
 	var solExistente dominio.SolicitacaoImpressao
 	if err := h.DB.Where("chave_idempotencia = ?", chaveIdem).First(&solExistente).Error; err == nil {
-		// já existe, retorna mesma resposta
 		c.JSON(http.StatusOK, solExistente)
 		return
 	}
 
-	// verificar se nota existe
 	var nota dominio.NotaFiscal
 	if err := h.DB.First(&nota, "id = ?", notaID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"erro": "Nota não encontrada"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"erro": "Nota nao encontrada"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar nota"})
@@ -173,11 +169,10 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 	}
 
 	if nota.Status != dominio.StatusNotaAberta {
-		c.JSON(http.StatusConflict, gin.H{"erro": "Nota não está aberta"})
+		c.JSON(http.StatusConflict, gin.H{"erro": "Nota nao esta aberta"})
 		return
 	}
 
-	// buscar itens da nota pra enviar no evento
 	var itens []dominio.ItemNota
 	if err := h.DB.Where("nota_id = ?", notaID).Find(&itens).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar itens"})
@@ -185,11 +180,10 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 	}
 
 	if len(itens) == 0 {
-		c.JSON(http.StatusConflict, gin.H{"erro": "Nota sem itens não pode ser impressa"})
+		c.JSON(http.StatusConflict, gin.H{"erro": "Nota sem itens nao pode ser impressa"})
 		return
 	}
 
-	// criar solicitação + publicar evento no outbox (transação garante atomicidade)
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
 		sol := dominio.SolicitacaoImpressao{
 			NotaID:            notaID,
@@ -198,18 +192,20 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 		}
 
 		if err := tx.Create(&sol).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				return nil
+			}
 			return err
 		}
 
-		// montar payload JSON com lista de itens pra reservar
 		type itemEvento struct {
 			ProdutoID  string `json:"produtoId"`
 			Quantidade int    `json:"quantidade"`
 		}
 
 		type payloadEvento struct {
-			NotaID string        `json:"notaId"`
-			Itens  []itemEvento  `json:"itens"`
+			NotaID string       `json:"notaId"`
+			Itens  []itemEvento `json:"itens"`
 		}
 
 		var itensEvento []itemEvento
@@ -230,7 +226,6 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 			return fmt.Errorf("falha ao serializar payload: %w", err)
 		}
 
-		// inserir evento no outbox (será publicado pelo background worker)
 		eventoOutbox := dominio.EventoOutbox{
 			TipoEvento:     "Faturamento.ImpressaoSolicitada",
 			IdAgregado:     notaID,
@@ -242,9 +237,7 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 			return fmt.Errorf("falha ao criar evento outbox: %w", err)
 		}
 
-		log.Printf("✓ Evento criado no outbox: %s para nota %s", eventoOutbox.TipoEvento, notaID)
-
-		// sucesso: commit da transação
+		log.Printf("[outbox] Evento de impressao criado: %s para nota %s", eventoOutbox.TipoEvento, notaID)
 		return nil
 	})
 
@@ -253,10 +246,9 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 		return
 	}
 
-	// buscar a solicitação criada pra retornar
 	var solCriada dominio.SolicitacaoImpressao
 	if err := h.DB.Where("chave_idempotencia = ?", chaveIdem).First(&solCriada).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar solicitação"})
+		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar solicitacao"})
 		return
 	}
 
@@ -267,27 +259,26 @@ func (h *Handlers) ImprimirNota(c *gin.Context) {
 func (h *Handlers) ConsultarStatusImpressao(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID inválido"})
+		c.JSON(http.StatusBadRequest, gin.H{"erro": "ID invalido"})
 		return
 	}
 
 	var sol dominio.SolicitacaoImpressao
 	if err := h.DB.First(&sol, "id = ?", id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"erro": "Solicitação não encontrada"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"erro": "Solicitacao nao encontrada"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar solicitação"})
+		c.JSON(http.StatusInternalServerError, gin.H{"erro": "Falha ao buscar solicitacao"})
 		return
 	}
 
 	c.JSON(http.StatusOK, sol)
 }
 
-// FecharNota é chamado pelo consumidor quando recebe "Estoque.Reservado"
+// FecharNota e chamado pelo consumidor quando recebe "Estoque.Reservado"
 func (h *Handlers) FecharNota(notaID uuid.UUID) error {
 	return h.DB.Transaction(func(tx *gorm.DB) error {
-		// busca com lock pessimista
 		var nota dominio.NotaFiscal
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			First(&nota, "id = ?", notaID).Error; err != nil {
@@ -302,12 +293,11 @@ func (h *Handlers) FecharNota(notaID uuid.UUID) error {
 			return err
 		}
 
-		// atualiza solicitação pra CONCLUIDA
 		agora := time.Now()
 		if err := tx.Model(&dominio.SolicitacaoImpressao{}).
 			Where("nota_id = ? AND status = ?", notaID, "PENDENTE").
 			Updates(map[string]interface{}{
-				"status":          "CONCLUIDA",
+				"status":         "CONCLUIDA",
 				"data_conclusao": agora,
 			}).Error; err != nil {
 			return err
@@ -317,12 +307,12 @@ func (h *Handlers) FecharNota(notaID uuid.UUID) error {
 	})
 }
 
-// MarcarFalha é chamado quando recebe "Estoque.ReservaRejeitada"
+// MarcarFalha e chamado quando recebe "Estoque.ReservaRejeitada"
 func (h *Handlers) MarcarFalha(notaID uuid.UUID, motivo string) error {
 	return h.DB.Model(&dominio.SolicitacaoImpressao{}).
 		Where("nota_id = ? AND status = ?", notaID, "PENDENTE").
 		Updates(map[string]interface{}{
-			"status":         "FALHOU",
+			"status":        "FALHOU",
 			"mensagem_erro": motivo,
 		}).Error
 }
